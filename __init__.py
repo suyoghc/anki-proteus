@@ -128,9 +128,21 @@ def toggle_response_mode():
 # Card eligibility
 # ---------------------------------------------------------------------------
 
+def _is_image_occlusion(card) -> bool:
+    """Check if a card is an image occlusion type."""
+    try:
+        note_type = card.note_type()
+        return "image occlusion" in note_type["name"].lower()
+    except Exception:
+        return False
+
+
 def should_transform(card) -> bool:
     """Decide whether this card should get a variant."""
     if not CONFIG.get("api_key"):
+        return False
+
+    if _is_image_occlusion(card):
         return False
 
     # Check deck filter
@@ -163,6 +175,9 @@ def should_prefetch(card) -> bool:
     whether to actually show the variant or the original.
     """
     if not CONFIG.get("api_key"):
+        return False
+
+    if _is_image_occlusion(card):
         return False
 
     # Check deck filter

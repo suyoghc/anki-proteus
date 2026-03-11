@@ -5,6 +5,10 @@ Spawns up to `max_concurrent` QThread workers that pull work items
 from a shared queue, generate variants, and store them in the cache.
 All collection access (card text extraction) happens on the main thread
 before items are enqueued — workers only receive plain strings.
+
+Progress is tracked via a main-thread QTimer polling a thread-safe
+counter — no cross-thread Qt signals, which avoids reentrant event
+processing crashes.
 """
 
 import os
@@ -13,7 +17,7 @@ import threading
 import time as _time
 from typing import List, Optional
 
-from aqt.qt import QObject, QThread, pyqtSignal
+from aqt.qt import QObject, QThread, QTimer, pyqtSignal
 
 from .generator import generate_variant
 from .cache import VariantCache
@@ -34,15 +38,14 @@ def _log(msg, debug=True):
 class _BatchWorker(QThread):
     """Worker thread that pulls items from a shared queue and generates variants."""
 
-    item_done = pyqtSignal(int)  # card_id
-
-    def __init__(self, work_queue, cache, config, cancel_event, debug=False, parent=None):
-        # type: (queue.Queue, VariantCache, dict, threading.Event, bool, Optional[QObject]) -> None
+    def __init__(self, work_queue, cache, config, cancel_event, completed_counter, debug=False, parent=None):
+        # type: (queue.Queue, VariantCache, dict, threading.Event, list, bool, Optional[QObject]) -> None
         super().__init__(parent)
         self._queue = work_queue
         self._cache = cache
         self._config = config
         self._cancel = cancel_event
+        self._completed = completed_counter  # [count] — shared mutable list
         self._debug = debug
 
     def run(self):
@@ -57,7 +60,7 @@ class _BatchWorker(QThread):
             # Another worker (or single-card prefetch) may have filled this
             if self._cache.has_variant(card_id):
                 _log(f"worker: card {card_id} already cached, skipping", self._debug)
-                self.item_done.emit(card_id)
+                self._completed[0] += 1
                 continue
 
             try:
@@ -74,7 +77,7 @@ class _BatchWorker(QThread):
             except Exception as e:
                 _log(f"worker error for card {card_id}: {e}", self._debug)
 
-            self.item_done.emit(card_id)
+            self._completed[0] += 1
 
 
 class BatchPrefetchManager(QObject):
@@ -83,6 +86,9 @@ class BatchPrefetchManager(QObject):
 
     Enqueue work items (card_id, question, answer) then call start().
     Workers run in parallel up to max_concurrent.
+
+    Progress is polled from the main thread via QTimer — no cross-thread
+    signal emission, which avoids Qt reentrant event loop crashes.
     """
 
     progress = pyqtSignal(int, int)  # (completed, total)
@@ -99,8 +105,9 @@ class BatchPrefetchManager(QObject):
         self._cancel_event = threading.Event()
         self._workers = []  # type: List[_BatchWorker]
         self._total = 0
-        self._completed = 0
-        self._lock = threading.Lock()
+        self._completed = [0]  # mutable counter shared with workers
+        self._last_reported = 0
+        self._poll_timer = None  # type: Optional[QTimer]
 
     def enqueue(self, card_id, question, answer):
         # type: (int, str, str) -> None
@@ -118,18 +125,25 @@ class BatchPrefetchManager(QObject):
         for _ in range(num_workers):
             worker = _BatchWorker(
                 self._queue, self._cache, self._config,
-                self._cancel_event, debug=self._debug, parent=self,
+                self._cancel_event, self._completed,
+                debug=self._debug, parent=self,
             )
-            worker.item_done.connect(self._on_item_done)
-            worker.finished.connect(self._on_worker_finished)
             self._workers.append(worker)
 
         for w in self._workers:
             w.start()
 
+        # Poll progress from main thread every 500ms
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(self._poll_progress)
+        self._poll_timer.start(500)
+
     def cancel(self):
         """Stop workers after their current item finishes."""
         self._cancel_event.set()
+        if self._poll_timer:
+            self._poll_timer.stop()
+            self._poll_timer = None
         # Drain the queue so workers exit promptly
         while not self._queue.empty():
             try:
@@ -137,16 +151,15 @@ class BatchPrefetchManager(QObject):
             except queue.Empty:
                 break
 
-    def _on_item_done(self, card_id):
-        # type: (int) -> None
-        with self._lock:
-            self._completed += 1
-            completed = self._completed
-            total = self._total
-        self.progress.emit(completed, total)
+    def _poll_progress(self):
+        """Called on main thread by QTimer. Check worker progress."""
+        completed = self._completed[0]
 
-    def _on_worker_finished(self):
-        """Check if all workers are done."""
-        all_finished = all(w.isFinished() for w in self._workers)
-        if all_finished:
+        if completed != self._last_reported:
+            self._last_reported = completed
+            self.progress.emit(completed, self._total)
+
+        if completed >= self._total or all(w.isFinished() for w in self._workers):
+            self._poll_timer.stop()
+            self._poll_timer = None
             self.all_done.emit()
