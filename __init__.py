@@ -53,6 +53,7 @@ def load_config():
         "min_interval_days": 0,            # only transform cards above this interval
         "max_cached_variants": 3,          # variants to pre-generate per card
         "system_prompt": "",               # optional domain context for generation
+        "exclude_note_types": ["Image Occlusion"],  # note types to skip
         "batch_prefetch_count": 15,        # cards to pre-generate on session start (0 = off)
         "batch_prefetch_concurrency": 3,   # max simultaneous API calls
         "show_prefetch_progress": True,    # show tooltip progress during batch prefetch
@@ -128,11 +129,12 @@ def toggle_response_mode():
 # Card eligibility
 # ---------------------------------------------------------------------------
 
-def _is_image_occlusion(card) -> bool:
-    """Check if a card is an image occlusion type."""
+def _is_excluded_note_type(card) -> bool:
+    """Check if a card's note type is in the exclusion list."""
     try:
-        note_type = card.note_type()
-        return "image occlusion" in note_type["name"].lower()
+        note_name = card.note_type()["name"].lower()
+        excluded = CONFIG.get("exclude_note_types", [])
+        return any(e.lower() in note_name for e in excluded)
     except Exception:
         return False
 
@@ -142,7 +144,7 @@ def should_transform(card) -> bool:
     if not CONFIG.get("api_key"):
         return False
 
-    if _is_image_occlusion(card):
+    if _is_excluded_note_type(card):
         return False
 
     # Check deck filter
@@ -177,7 +179,7 @@ def should_prefetch(card) -> bool:
     if not CONFIG.get("api_key"):
         return False
 
-    if _is_image_occlusion(card):
+    if _is_excluded_note_type(card):
         return False
 
     # Check deck filter
