@@ -132,7 +132,7 @@ def should_transform(card) -> bool:
 
 def on_card_will_show(text: str, card, kind: str) -> str:
     """Intercept card display. Replace question with variant if eligible."""
-    global _current_variant, _current_card_id, _evaluation_text
+    global _current_variant, _current_card_id, _evaluation_text, _user_response
 
     if kind == "question":
         _evaluation_text = None
@@ -374,9 +374,11 @@ def show_config_dialog():
 
 
 def _on_config_updated(conf):
-    """Reload config when user edits it."""
+    """Reload config and update cache settings."""
     global CONFIG
     CONFIG = load_config()
+    if _cache:
+        _cache._max_variants = CONFIG.get("max_cached_variants", 3)
 
 
 # ---------------------------------------------------------------------------
