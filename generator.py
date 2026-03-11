@@ -9,6 +9,7 @@ Uses the Anthropic API to:
 import json
 import urllib.request
 import urllib.error
+from typing import Optional
 
 API_URL = "https://api.anthropic.com/v1/messages"
 
@@ -42,7 +43,7 @@ Original answer: {answer}
 Generate one variant question that tests the same concept."""
 
 
-def generate_variant(question: str, answer: str, config: dict) -> str | None:
+def generate_variant(question: str, answer: str, config: dict) -> Optional[str]:
     """
     Generate a variant question via LLM.
 
@@ -104,7 +105,7 @@ def grade_response(
     user_response: str,
     canonical_answer: str,
     config: dict,
-) -> str | None:
+) -> Optional[str]:
     """
     Grade a freeform response against the canonical answer.
 
@@ -137,7 +138,7 @@ def _call_api(
     system: str,
     user_message: str,
     max_tokens: int = 300,
-) -> str | None:
+) -> Optional[str]:
     """Make a single Anthropic API call. Returns text or None."""
     payload = {
         "model": model,
@@ -164,8 +165,8 @@ def _call_api(
                     return block["text"].strip()
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")
-        print(f"[VariantReviewer] API error {e.code}: {error_body}")
+        print(f"[Proteus] API error {e.code}: {error_body}")
     except Exception as e:
-        print(f"[VariantReviewer] API call failed: {e}")
+        print(f"[Proteus] API call failed: {e}")
 
     return None
