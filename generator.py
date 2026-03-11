@@ -7,11 +7,77 @@ Uses the Anthropic API to:
 """
 
 import json
+import os
+import threading
 import urllib.request
 import urllib.error
 from typing import Optional
 
 API_URL = "https://api.anthropic.com/v1/messages"
+
+# ---------------------------------------------------------------------------
+# Token Usage Tracking
+# ---------------------------------------------------------------------------
+
+ADDON_DIR = os.path.dirname(__file__)
+_USAGE_PATH = os.path.join(ADDON_DIR, "usage.json")
+_usage_lock = threading.Lock()
+_usage_tracker = None  # lazy-loaded
+
+
+def _load_usage() -> dict:
+    """Load usage stats from disk, or return fresh counters."""
+    try:
+        with open(_USAGE_PATH, "r") as f:
+            data = json.load(f)
+            return {
+                "input_tokens": data.get("input_tokens", 0),
+                "output_tokens": data.get("output_tokens", 0),
+                "api_calls": data.get("api_calls", 0),
+            }
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        return {"input_tokens": 0, "output_tokens": 0, "api_calls": 0}
+
+
+def _save_usage(data: dict):
+    """Persist usage stats to disk."""
+    try:
+        with open(_USAGE_PATH, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def _get_tracker() -> dict:
+    """Lazy-init and return the usage tracker."""
+    global _usage_tracker
+    if _usage_tracker is None:
+        _usage_tracker = _load_usage()
+    return _usage_tracker
+
+
+def _record_usage(input_tokens: int, output_tokens: int):
+    """Thread-safe: accumulate token counts and persist."""
+    with _usage_lock:
+        tracker = _get_tracker()
+        tracker["input_tokens"] += input_tokens
+        tracker["output_tokens"] += output_tokens
+        tracker["api_calls"] += 1
+        _save_usage(tracker)
+
+
+def get_usage() -> dict:
+    """Return a copy of the current usage stats."""
+    with _usage_lock:
+        return dict(_get_tracker())
+
+
+def reset_usage():
+    """Zero all counters and persist."""
+    global _usage_tracker
+    with _usage_lock:
+        _usage_tracker = {"input_tokens": 0, "output_tokens": 0, "api_calls": 0}
+        _save_usage(_usage_tracker)
 
 # ---------------------------------------------------------------------------
 # Variant Generation
@@ -159,6 +225,12 @@ def _call_api(
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.loads(resp.read().decode("utf-8"))
+            # Record token usage
+            usage = result.get("usage", {})
+            _record_usage(
+                usage.get("input_tokens", 0),
+                usage.get("output_tokens", 0),
+            )
             # Extract text from response
             for block in result.get("content", []):
                 if block.get("type") == "text":

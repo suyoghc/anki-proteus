@@ -18,7 +18,7 @@ from aqt.utils import showInfo, tooltip
 from aqt.qt import QAction, QThread, pyqtSignal, QObject
 from aqt.webview import AnkiWebView
 
-from .generator import generate_variant, grade_response
+from .generator import generate_variant, grade_response, get_usage, reset_usage
 from .cache import VariantCache
 from .prefetch import PrefetchWorker
 from .batch_prefetch import BatchPrefetchManager
@@ -58,6 +58,7 @@ def load_config():
         "batch_prefetch_concurrency": 3,   # max simultaneous API calls
         "show_prefetch_progress": True,    # show tooltip progress during batch prefetch
         "debug_logging": False,            # write to proteus_diag.log
+        "usage_budget": 5.00,              # monthly budget in USD (for progress bar)
     }
     conf = mw.addonManager.getConfig(__name__)
     if conf:
@@ -108,6 +109,11 @@ def init_addon():
     toggle_action.setShortcut("Ctrl+Shift+V")
     toggle_action.triggered.connect(toggle_response_mode)
     mw.form.menuTools.addAction(toggle_action)
+
+    # Add usage stats menu item
+    usage_action = QAction("Proteus Usage Stats", mw)
+    usage_action.triggered.connect(show_usage_dialog)
+    mw.form.menuTools.addAction(usage_action)
 
 
 def toggle_response_mode():
@@ -528,6 +534,111 @@ def _extract_text(card, side: str) -> str:
     text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
+
+
+# ---------------------------------------------------------------------------
+# Usage stats dialog
+# ---------------------------------------------------------------------------
+
+def _estimate_cost(input_t: int, output_t: int) -> float:
+    """Estimate USD cost using Sonnet pricing: $3/M input, $15/M output."""
+    return (input_t * 3.0 + output_t * 15.0) / 1_000_000
+
+
+def _usage_stats_text(usage: dict, budget: float) -> str:
+    """Build rich-text for the stats label (no bar — QLabel can't render divs)."""
+    input_t = usage["input_tokens"]
+    output_t = usage["output_tokens"]
+    calls = usage["api_calls"]
+    est_cost = _estimate_cost(input_t, output_t)
+
+    return (
+        f"<b>API Calls:</b> {calls:,}<br>"
+        f"<b>Input Tokens:</b> {input_t:,}<br>"
+        f"<b>Output Tokens:</b> {output_t:,}<br>"
+        f"<b>Total Tokens:</b> {input_t + output_t:,}<br><br>"
+        f"<b>Estimated Cost:</b> ${est_cost:.4f} / ${budget:.2f} budget"
+    )
+
+
+def _budget_pct(usage: dict, budget: float) -> int:
+    """Return budget usage as an integer percentage (capped at 100)."""
+    if budget <= 0:
+        return 0
+    est_cost = _estimate_cost(usage["input_tokens"], usage["output_tokens"])
+    return min(int(est_cost / budget * 100), 100)
+
+
+def _budget_bar_text(pct: int) -> str:
+    """Build a text-based progress bar: [████████░░░░] 42%"""
+    width = 20
+    filled = int(width * pct / 100)
+    empty = width - filled
+    if pct < 75:
+        color = "#4caf50"
+    elif pct < 100:
+        color = "#ff9800"
+    else:
+        color = "#f44336"
+    bar = "\u2588" * filled + "\u2591" * empty
+    return (
+        f"<code><span style='color: {color};'>{bar}</span></code> "
+        f"<b>{pct}%</b> of budget"
+    )
+
+
+def show_usage_dialog():
+    """Show a dialog with accumulated API usage stats and budget bar."""
+    try:
+        from aqt.qt import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout
+
+        usage = get_usage()
+        budget = CONFIG.get("usage_budget", 5.00)
+        pct = _budget_pct(usage, budget)
+
+        dlg = QDialog(mw)
+        dlg.setWindowTitle("Proteus Usage Stats")
+        dlg.setMinimumWidth(340)
+        layout = QVBoxLayout()
+
+        label = QLabel(_usage_stats_text(usage, budget))
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        bar_label = QLabel(_budget_bar_text(pct))
+        bar_label.setWordWrap(True)
+        layout.addWidget(bar_label)
+
+        footer = QLabel(
+            "<span style='color: #888; font-size: 0.85em;'>"
+            "Based on Sonnet pricing ($3/M in, $15/M out)<br>"
+            "Budget configurable in Proteus Settings</span>"
+        )
+        footer.setWordWrap(True)
+        layout.addWidget(footer)
+
+        btn_layout = QHBoxLayout()
+        reset_btn = QPushButton("Reset")
+        close_btn = QPushButton("Close")
+
+        def on_reset():
+            reset_usage()
+            new_usage = get_usage()
+            new_pct = _budget_pct(new_usage, budget)
+            label.setText(_usage_stats_text(new_usage, budget))
+            bar_label.setText(_budget_bar_text(new_pct))
+            tooltip("Proteus: usage stats reset")
+
+        reset_btn.clicked.connect(on_reset)
+        close_btn.clicked.connect(dlg.accept)
+        btn_layout.addWidget(reset_btn)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+        dlg.setLayout(layout)
+        dlg.exec()
+    except Exception as e:
+        showInfo(f"Proteus: usage dialog error: {e}")
 
 
 # ---------------------------------------------------------------------------
