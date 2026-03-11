@@ -20,6 +20,7 @@ from aqt.webview import AnkiWebView
 from .generator import generate_variant, grade_response
 from .cache import VariantCache
 from .prefetch import PrefetchWorker
+from .batch_prefetch import BatchPrefetchManager
 
 # ---------------------------------------------------------------------------
 # Config
@@ -39,6 +40,9 @@ def load_config():
         "min_interval_days": 0,            # only transform cards above this interval
         "max_cached_variants": 3,          # variants to pre-generate per card
         "system_prompt": "",               # optional domain context for generation
+        "batch_prefetch_count": 15,        # cards to pre-generate on session start (0 = off)
+        "batch_prefetch_concurrency": 3,   # max simultaneous API calls
+        "show_prefetch_progress": True,    # show tooltip progress during batch prefetch
     }
     conf = mw.addonManager.getConfig(__name__)
     if conf:
@@ -53,6 +57,7 @@ CONFIG = {}
 
 _cache: VariantCache = None
 _prefetch_worker: PrefetchWorker = None
+_batch_manager: BatchPrefetchManager = None
 _current_variant: str = None          # variant being shown right now
 _current_card_id: int = None
 _user_response: str = ""              # captured from freeform text input
@@ -76,6 +81,7 @@ def init_addon():
     gui_hooks.reviewer_did_show_question.append(on_question_shown)
     gui_hooks.reviewer_did_show_answer.append(on_answer_shown)
     gui_hooks.webview_did_receive_js_message.append(on_js_message)
+    gui_hooks.state_did_change.append(on_state_did_change)
 
     # Add config menu item
     action = QAction("Proteus Settings", mw)
@@ -125,6 +131,32 @@ def should_transform(card) -> bool:
     import random
     pct = CONFIG.get("transform_percent", 80)
     if random.randint(1, 100) > pct:
+        return False
+
+    return True
+
+
+def should_prefetch(card) -> bool:
+    """
+    Decide whether a card is eligible for pre-generation.
+
+    Same as should_transform() but WITHOUT the random roll — we always
+    prefetch eligible cards.  The random roll at review time decides
+    whether to actually show the variant or the original.
+    """
+    if not CONFIG.get("api_key"):
+        return False
+
+    # Check deck filter
+    active = CONFIG.get("active_decks", [])
+    if active:
+        deck_name = mw.col.decks.name(card.did)
+        if not any(a.lower() in deck_name.lower() for a in active):
+            return False
+
+    # Check interval threshold
+    min_ivl = CONFIG.get("min_interval_days", 0)
+    if card.ivl < min_ivl:
         return False
 
     return True
@@ -276,6 +308,88 @@ def _prefetch_next_card():
     except Exception:
         # Pre-fetching is best-effort; never break the review flow
         pass
+
+
+# ---------------------------------------------------------------------------
+# Batch pre-fetch on session start
+# ---------------------------------------------------------------------------
+
+def on_state_did_change(new_state: str, old_state: str):
+    """Start batch prefetch when entering review, cancel when leaving."""
+    if new_state == "review":
+        _start_batch_prefetch()
+    elif old_state == "review":
+        _cancel_batch_prefetch()
+
+
+def _start_batch_prefetch():
+    """Pre-generate variants for the first N due cards."""
+    global _batch_manager
+
+    count = CONFIG.get("batch_prefetch_count", 15)
+    if count <= 0 or not CONFIG.get("api_key"):
+        return
+
+    try:
+        queued = mw.col.sched.get_queued_cards(fetch_limit=count)
+    except Exception as e:
+        print(f"[Proteus] Batch prefetch: could not get queued cards: {e}")
+        return
+
+    if not queued or not queued.cards:
+        return
+
+    concurrency = CONFIG.get("batch_prefetch_concurrency", 3)
+    _batch_manager = BatchPrefetchManager(
+        cache=_cache,
+        config=CONFIG,
+        max_concurrent=concurrency,
+    )
+
+    enqueued = 0
+    for entry in queued.cards:
+        card = mw.col.get_card(entry.card.id)
+        if not should_prefetch(card):
+            continue
+        if _cache.has_variant(card.id):
+            continue
+
+        question = _extract_text(card, "question")
+        answer = _extract_text(card, "answer")
+        _batch_manager.enqueue(card.id, question, answer)
+        enqueued += 1
+
+    if enqueued == 0:
+        _batch_manager = None
+        return
+
+    if CONFIG.get("show_prefetch_progress", True):
+        _batch_manager.progress.connect(_on_batch_progress)
+        _batch_manager.all_done.connect(_on_batch_done)
+
+    _batch_manager.start()
+
+    if CONFIG.get("show_prefetch_progress", True):
+        tooltip(f"Proteus: pre-generating variants (0/{enqueued})")
+
+
+def _on_batch_progress(completed, total):
+    # type: (int, int) -> None
+    if CONFIG.get("show_prefetch_progress", True):
+        tooltip(f"Proteus: pre-generating variants ({completed}/{total})")
+
+
+def _on_batch_done():
+    if CONFIG.get("show_prefetch_progress", True):
+        tooltip("Proteus: variants ready")
+
+
+def _cancel_batch_prefetch():
+    """Cancel any in-progress batch prefetch."""
+    global _batch_manager
+    if _batch_manager:
+        _batch_manager.cancel()
+        _batch_manager = None
 
 
 # ---------------------------------------------------------------------------

@@ -6,5 +6,8 @@
     "transform_percent": 80,
     "min_interval_days": 0,
     "max_cached_variants": 3,
-    "system_prompt": ""
+    "system_prompt": "",
+    "batch_prefetch_count": 15,
+    "batch_prefetch_concurrency": 3,
+    "show_prefetch_progress": true
 }
