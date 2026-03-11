@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 variant_cache.db
+meta.json
+proteus_diag.log

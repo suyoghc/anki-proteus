@@ -233,8 +233,7 @@ def on_js_message(handled: tuple, message: str, context):
 
     if message.startswith("variantResponse:"):
         _user_response = message[len("variantResponse:"):]
-        handled = (True,)
-        return handled
+        return (True, None)
 
     return handled
 
