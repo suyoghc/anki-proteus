@@ -238,6 +238,50 @@ class TestGradingConfig:
         assert out["missed"] == []
         assert out["learning_feedback"] == ["Good related intuition."]
 
+    def test_grade_response_salvages_truncated_json(self, monkeypatch):
+        """Truncated JSON should still return structured alignment/related feedback."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return (
+                '{"alignment":"partial","alignment_note":"target overlap but incomplete",'
+                '"learning_feedback":["Good intuition about dependencies","Generalization caveat"'
+            )
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["alignment"] == "partial"
+        assert out["alignment_note"] == "target overlap but incomplete"
+        assert out["learning_feedback"] == [
+            "Good intuition about dependencies",
+            "Generalization caveat",
+        ]
+        assert not out["overall"].startswith("{")
+
+    def test_grade_response_invalid_json_uses_clean_fallback(self, monkeypatch):
+        """Totally invalid JSON should not leak raw payload into overall."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return "<<<bad-output>>>"
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["overall"] == "Evaluation unavailable."
+        assert out["score"] == 0
+
 
 # ===========================================================================
 # 9-14  Variant cache (cache.py)

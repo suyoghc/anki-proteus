@@ -499,6 +499,8 @@ def _render_evaluation_html(data):
         (incorrect, "Incorrect", "#ef5350", "#fce4ec"),
         (missed,    "Missed",    "#ffa726", "#fff8e1"),
     ]
+    if learning_feedback:
+        columns.append((learning_feedback, "Related", "#1e88e5", "#e3f2fd"))
     # Only include columns that have items
     active = [(items, label, color, bg) for items, label, color, bg in columns if items]
 
@@ -506,6 +508,16 @@ def _render_evaluation_html(data):
         return html.escape(str(data))
 
     parts = []
+
+    if alignment == "partial":
+        msg = "Partial alignment."
+        if alignment_note:
+            msg += " " + alignment_note
+        parts.append(
+            '<div style="margin-bottom: 8px; font-style: italic; color: #555;">'
+            + html.escape(msg) +
+            '</div>'
+        )
 
     # Overall summary + score on top
     if overall or score >= 1:
@@ -1333,6 +1345,18 @@ def show_card_ideas_dialog():
                 draft_edit.setMinimumHeight(72)
                 fl.addWidget(draft_edit)
 
+                regen_row = QHBoxLayout()
+                short_btn = QPushButton("Shorter")
+                concrete_btn = QPushButton("More Concrete")
+                jargon_btn = QPushButton("Less Jargon")
+                contrast_btn = QPushButton("Add Contrast Case")
+                regen_row.addWidget(short_btn)
+                regen_row.addWidget(concrete_btn)
+                regen_row.addWidget(jargon_btn)
+                regen_row.addWidget(contrast_btn)
+                fl.addLayout(regen_row)
+                regen_buttons = [short_btn, concrete_btn, jargon_btn, contrast_btn]
+
                 tag_row = QHBoxLayout()
                 tag_row.addWidget(QLabel("Tag:"))
                 reason_combo = QComboBox()
@@ -1398,18 +1422,6 @@ def show_card_ideas_dialog():
                             fl.addWidget(eval_lbl)
                     except (json.JSONDecodeError, ValueError):
                         pass
-
-                regen_row = QHBoxLayout()
-                short_btn = QPushButton("Shorter")
-                concrete_btn = QPushButton("More Concrete")
-                jargon_btn = QPushButton("Less Jargon")
-                contrast_btn = QPushButton("Add Contrast Case")
-                regen_row.addWidget(short_btn)
-                regen_row.addWidget(concrete_btn)
-                regen_row.addWidget(jargon_btn)
-                regen_row.addWidget(contrast_btn)
-                fl.addLayout(regen_row)
-                regen_buttons = [short_btn, concrete_btn, jargon_btn, contrast_btn]
 
                 btn_row = QHBoxLayout()
                 save_btn = QPushButton("Save Edit")

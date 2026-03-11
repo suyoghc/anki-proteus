@@ -8,6 +8,7 @@ Uses the Anthropic API to:
 
 import json
 import os
+import re
 import threading
 import urllib.request
 import urllib.error
@@ -171,6 +172,13 @@ Scoring rule:
 - If alignment is "misaligned", set "score" to 0 and set "correct"/"incorrect"/"missed" to empty arrays.
 - Otherwise score 1 to 5 (1=completely wrong, 3=partial, 5=perfect).
 
+Output limits (strict):
+- "alignment_note": max 18 words.
+- "overall": max 18 words.
+- Each array item: max 14 words.
+- Max 2 items in "learning_feedback".
+- Max 2 items each in "correct", "incorrect", and "missed".
+
 Keep each bullet point to one concise sentence. Return ONLY the JSON object, no markdown fences."""
 
 GRADING_USER_TEMPLATE = """Question shown: {question}
@@ -180,6 +188,132 @@ Canonical answer: {answer}
 Learner's response: {response}
 
 Evaluate their response as JSON."""
+
+
+def _decode_json_fragment(text: str) -> str:
+    """Decode a JSON-escaped string fragment; best effort."""
+    try:
+        return str(json.loads('"%s"' % text))
+    except Exception:
+        return text
+
+
+def _extract_json_string_field(raw: str, key: str) -> str:
+    """Extract a JSON string field from possibly-truncated JSON text."""
+    pattern = r'"%s"\s*:\s*"((?:[^"\\]|\\.)*)"' % re.escape(key)
+    match = re.search(pattern, raw, re.S)
+    if not match:
+        return ""
+    return _decode_json_fragment(match.group(1)).strip()
+
+
+def _extract_json_int_field(raw: str, key: str, default: int = 0) -> int:
+    """Extract an integer field from possibly-truncated JSON text."""
+    pattern = r'"%s"\s*:\s*(-?\d+)' % re.escape(key)
+    match = re.search(pattern, raw)
+    if not match:
+        return default
+    try:
+        return int(match.group(1))
+    except Exception:
+        return default
+
+
+def _extract_json_string_list_field(raw: str, key: str, limit: int = 3) -> list:
+    """Extract list-of-string field from possibly-truncated JSON text."""
+    pattern_closed = r'"%s"\s*:\s*\[(.*?)\]' % re.escape(key)
+    match = re.search(pattern_closed, raw, re.S)
+    segment = ""
+    if match:
+        segment = match.group(1)
+    else:
+        pattern_open = r'"%s"\s*:\s*\[(.*)$' % re.escape(key)
+        match = re.search(pattern_open, raw, re.S)
+        if match:
+            segment = match.group(1)
+    if not segment:
+        return []
+
+    items = []
+    for m in re.finditer(r'"((?:[^"\\]|\\.)*)"', segment):
+        text = _decode_json_fragment(m.group(1)).strip()
+        if text:
+            items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _normalize_grading_payload(data: dict) -> dict:
+    """Normalize and guard grading payload fields."""
+    alignment = str(data.get("alignment", "aligned")).strip().lower()
+    if alignment not in ("aligned", "partial", "misaligned"):
+        alignment = "aligned"
+
+    alignment_note = str(data.get("alignment_note", "")).strip()
+    learning_feedback = [str(x).strip() for x in list(data.get("learning_feedback", [])) if str(x).strip()][:2]
+    correct = [str(x).strip() for x in list(data.get("correct", [])) if str(x).strip()][:2]
+    incorrect = [str(x).strip() for x in list(data.get("incorrect", [])) if str(x).strip()][:2]
+    missed = [str(x).strip() for x in list(data.get("missed", [])) if str(x).strip()][:2]
+    overall = str(data.get("overall", "")).strip()
+
+    try:
+        score = int(data.get("score", 3))
+    except Exception:
+        score = 3
+    if score < 0:
+        score = 0
+    if score > 5:
+        score = 5
+
+    if alignment == "misaligned":
+        correct = []
+        incorrect = []
+        missed = []
+        score = 0
+        if not overall:
+            overall = "Question drifted from canonical target."
+
+    return {
+        "alignment": alignment,
+        "alignment_note": alignment_note,
+        "learning_feedback": learning_feedback,
+        "correct": correct,
+        "incorrect": incorrect,
+        "missed": missed,
+        "overall": overall,
+        "score": score,
+    }
+
+
+def _parse_partial_grading_payload(raw: str) -> Optional[dict]:
+    """Best-effort parse of truncated/non-JSON grading text."""
+    if not raw:
+        return None
+
+    data = {
+        "alignment": _extract_json_string_field(raw, "alignment") or "aligned",
+        "alignment_note": _extract_json_string_field(raw, "alignment_note"),
+        "learning_feedback": _extract_json_string_list_field(raw, "learning_feedback", limit=2),
+        "correct": _extract_json_string_list_field(raw, "correct", limit=2),
+        "incorrect": _extract_json_string_list_field(raw, "incorrect", limit=2),
+        "missed": _extract_json_string_list_field(raw, "missed", limit=2),
+        "overall": _extract_json_string_field(raw, "overall"),
+        "score": _extract_json_int_field(raw, "score", default=3),
+    }
+
+    has_signal = any([
+        data["alignment_note"],
+        data["learning_feedback"],
+        data["correct"],
+        data["incorrect"],
+        data["missed"],
+        data["overall"],
+        '"alignment"' in raw,
+    ])
+    if not has_signal:
+        return None
+    return _normalize_grading_payload(data)
 
 
 def grade_response(
@@ -193,7 +327,7 @@ def grade_response(
 
     Returns a dict with keys: alignment, alignment_note, learning_feedback,
     correct, incorrect, missed, overall, score.
-    Falls back to {"overall": raw_text, ...} if JSON parsing fails.
+    Falls back to a neutral structured payload if JSON parsing fails.
     Returns None on API failure.
     """
     api_key = config.get("api_key", "")
@@ -237,33 +371,12 @@ def grade_response(
 
     try:
         data = json.loads(raw)
-        alignment = str(data.get("alignment", "aligned")).strip().lower()
-        if alignment not in ("aligned", "partial", "misaligned"):
-            alignment = "aligned"
-
-        correct = list(data.get("correct", []))
-        incorrect = list(data.get("incorrect", []))
-        missed = list(data.get("missed", []))
-        score = int(data.get("score", 3))
-        if alignment == "misaligned":
-            correct = []
-            incorrect = []
-            missed = []
-            score = 0
-
-        # Validate expected keys exist with correct types
-        return {
-            "alignment": alignment,
-            "alignment_note": str(data.get("alignment_note", "")),
-            "learning_feedback": list(data.get("learning_feedback", [])),
-            "correct": correct,
-            "incorrect": incorrect,
-            "missed": missed,
-            "overall": str(data.get("overall", "")),
-            "score": score,
-        }
+        return _normalize_grading_payload(dict(data))
     except (json.JSONDecodeError, ValueError, TypeError):
-        # LLM didn't return valid JSON — wrap raw text as fallback
+        partial = _parse_partial_grading_payload(raw)
+        if partial is not None:
+            return partial
+        # LLM didn't return valid JSON — return neutral fallback (no raw dump)
         return {
             "alignment": "aligned",
             "alignment_note": "",
@@ -271,7 +384,7 @@ def grade_response(
             "correct": [],
             "incorrect": [],
             "missed": [],
-            "overall": raw,
+            "overall": "Evaluation unavailable.",
             "score": 0,
         }
 
