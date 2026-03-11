@@ -156,6 +156,8 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             )
             if variant:
                 _cache.store_variant(card.id, variant)
+            else:
+                tooltip("Proteus: variant generation failed — check API key and debug console")
 
         if variant:
             _current_variant = variant
@@ -368,9 +370,8 @@ def _extract_text(card, side: str) -> str:
 def show_config_dialog():
     """Open the addon config in Anki's built-in config editor."""
     mw.addonManager.onConfigUpdated = _on_config_updated
-    # Anki's built-in config editor
-    from aqt.addons import ConfigEditor
-    ConfigEditor(mw.addonManager, __name__.split(".")[0], mw)
+    addon_module = __name__.split(".")[0]
+    mw.addonManager.onEdit(addon_module)
 
 
 def _on_config_updated(conf):
