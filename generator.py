@@ -145,6 +145,8 @@ GRADING_SYSTEM_PROMPT = """You are a response evaluator for a spaced repetition 
 The learner was shown a question and gave a spoken/typed response. Your job is to
 evaluate whether their response demonstrates understanding of the concept.
 
+First, decide whether the shown question is aligned to the canonical answer target.
+
 Rules:
 - The response may be voice-transcribed: ignore filler words, disfluencies, grammar
   issues, and informal phrasing. Evaluate ONLY conceptual correctness.
@@ -152,13 +154,22 @@ Rules:
 - Be encouraging but honest.
 - Do NOT repeat the full answer back to them — they'll see the original answer
   alongside your evaluation.
+- If question and canonical answer are misaligned, DO NOT grade correctness.
+- Always provide useful related-learning observations in "learning_feedback".
 
 Return your evaluation as a JSON object with exactly these keys:
+- "alignment": string — one of "aligned", "partial", "misaligned"
+- "alignment_note": string — short reason for the alignment judgment
+- "learning_feedback": array of strings — concise related insights (can be empty)
 - "correct": array of strings — key points the learner got right (empty array if none)
 - "incorrect": array of strings — things the learner stated incorrectly (empty array if none)
 - "missed": array of strings — important points from the canonical answer that the learner did not mention (empty array if none)
 - "overall": string — 1 sentence summary of their performance
-- "score": integer 1 to 5 (1=completely wrong, 3=partial, 5=perfect)
+- "score": integer 0 to 5
+
+Scoring rule:
+- If alignment is "misaligned", set "score" to 0 and set "correct"/"incorrect"/"missed" to empty arrays.
+- Otherwise score 1 to 5 (1=completely wrong, 3=partial, 5=perfect).
 
 Keep each bullet point to one concise sentence. Return ONLY the JSON object, no markdown fences."""
 
@@ -180,7 +191,8 @@ def grade_response(
     """
     Grade a freeform response against the canonical answer.
 
-    Returns a dict with keys: correct, incorrect, missed, overall, score.
+    Returns a dict with keys: alignment, alignment_note, learning_feedback,
+    correct, incorrect, missed, overall, score.
     Falls back to {"overall": raw_text, ...} if JSON parsing fails.
     Returns None on API failure.
     """
@@ -225,17 +237,37 @@ def grade_response(
 
     try:
         data = json.loads(raw)
+        alignment = str(data.get("alignment", "aligned")).strip().lower()
+        if alignment not in ("aligned", "partial", "misaligned"):
+            alignment = "aligned"
+
+        correct = list(data.get("correct", []))
+        incorrect = list(data.get("incorrect", []))
+        missed = list(data.get("missed", []))
+        score = int(data.get("score", 3))
+        if alignment == "misaligned":
+            correct = []
+            incorrect = []
+            missed = []
+            score = 0
+
         # Validate expected keys exist with correct types
         return {
-            "correct": list(data.get("correct", [])),
-            "incorrect": list(data.get("incorrect", [])),
-            "missed": list(data.get("missed", [])),
+            "alignment": alignment,
+            "alignment_note": str(data.get("alignment_note", "")),
+            "learning_feedback": list(data.get("learning_feedback", [])),
+            "correct": correct,
+            "incorrect": incorrect,
+            "missed": missed,
             "overall": str(data.get("overall", "")),
-            "score": int(data.get("score", 3)),
+            "score": score,
         }
     except (json.JSONDecodeError, ValueError, TypeError):
         # LLM didn't return valid JSON — wrap raw text as fallback
         return {
+            "alignment": "aligned",
+            "alignment_note": "",
+            "learning_feedback": [],
             "correct": [],
             "incorrect": [],
             "missed": [],

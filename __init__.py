@@ -431,11 +431,68 @@ def _start_grading_watchdog(card_id):
 def _render_evaluation_html(data):
     # type: (dict) -> str
     """Build color-coded HTML from structured grading data in a columnar layout."""
-    correct = data.get("correct", [])
-    incorrect = data.get("incorrect", [])
-    missed = data.get("missed", [])
-    overall = data.get("overall", "")
-    score = data.get("score", 0)
+    correct = list(data.get("correct", []))
+    incorrect = list(data.get("incorrect", []))
+    missed = list(data.get("missed", []))
+    overall = str(data.get("overall", ""))
+    alignment_note = str(data.get("alignment_note", ""))
+    alignment = str(data.get("alignment", "aligned")).strip().lower()
+    if alignment not in ("aligned", "partial", "misaligned"):
+        alignment = "aligned"
+    learning_feedback = data.get("learning_feedback", [])
+    if not isinstance(learning_feedback, list):
+        learning_feedback = []
+    try:
+        score = int(data.get("score", 0))
+    except Exception:
+        score = 0
+
+    if alignment == "misaligned":
+        parts = [
+            '<div style="margin-bottom: 8px; font-style: italic; color: #555;">'
+            'Question drifted from canonical target.'
+            '</div>'
+        ]
+
+        related = []
+        seen = set()
+        for item in (learning_feedback + correct + incorrect + missed):
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            related.append(text)
+
+        detail = overall.strip() or alignment_note.strip()
+        if detail and detail.lower() != "question drifted from canonical target.":
+            parts.append(
+                '<div style="margin-bottom: 8px; color: #4d4d4d;">'
+                + html.escape(detail)
+                + "</div>"
+            )
+
+        if related:
+            bullets = "".join(
+                f'<li style="margin-bottom: 4px;">{html.escape(str(item))}</li>'
+                for item in related
+            )
+            parts.append(
+                '<table style="width: 100%; border-collapse: collapse;'
+                ' margin-bottom: 8px; table-layout: fixed;">'
+                '<tr>'
+                '<td style="padding: 6px 8px; font-weight: bold; color: #1e88e5;'
+                ' background: #e3f2fd; border-bottom: 2px solid #1e88e5;'
+                ' vertical-align: top;">Related</td>'
+                '</tr>'
+                '<tr>'
+                '<td style="padding: 6px 8px; vertical-align: top;">'
+                '<ul style="margin: 0; padding: 0 0 0 14px; font-size: 0.9em;">'
+                + bullets +
+                '</ul></td>'
+                '</tr>'
+                '</table>'
+            )
+        return "".join(parts)
 
     columns = [
         (correct,   "Correct",   "#66bb6a", "#e8f5e9"),

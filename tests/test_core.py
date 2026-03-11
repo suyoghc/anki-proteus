@@ -207,6 +207,37 @@ class TestGradingConfig:
         assert calls[1][2] == 10  # fallback uses a slightly higher timeout floor
         assert out["score"] == 5
 
+    def test_grade_response_misaligned_zeroes_correctness(self, monkeypatch):
+        """Misaligned variants should not return correctness verdict fields."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return json.dumps({
+                "alignment": "misaligned",
+                "alignment_note": "target drift",
+                "learning_feedback": ["Good related intuition."],
+                "correct": ["point A"],
+                "incorrect": ["point B"],
+                "missed": ["point C"],
+                "overall": "Not directly comparable.",
+                "score": 5,
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["alignment"] == "misaligned"
+        assert out["score"] == 0
+        assert out["correct"] == []
+        assert out["incorrect"] == []
+        assert out["missed"] == []
+        assert out["learning_feedback"] == ["Good related intuition."]
+
 
 # ===========================================================================
 # 9-14  Variant cache (cache.py)
