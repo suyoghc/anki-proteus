@@ -1,0 +1,10 @@
+{
+    "api_key": "",
+    "model": "claude-sonnet-4-20250514",
+    "response_mode": "flip",
+    "active_decks": [],
+    "transform_percent": 80,
+    "min_interval_days": 0,
+    "max_cached_variants": 3,
+    "system_prompt": ""
+}

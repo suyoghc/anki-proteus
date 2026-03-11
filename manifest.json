@@ -1,0 +1,7 @@
+{
+    "name": "Proteus",
+    "package": "anki_proteus",
+    "homepage": "",
+    "conflicts": [],
+    "min_point_version": 50
+}
