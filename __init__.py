@@ -278,7 +278,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             if result:
                 _current_variant_id, _current_variant = result
                 styled_variant = _wrap_variant_html(_current_variant)
-                styled_variant += _feedback_buttons_html()
+                styled_variant += _feedback_buttons_html(card.id, _current_variant_id)
                 if CONFIG.get("response_mode") == "freeform":
                     styled_variant += _freeform_input_html()
                 return styled_variant
@@ -290,7 +290,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
                 extra = ""
                 if CONFIG.get("response_mode") == "freeform" and _user_response.strip():
                     extra = _evaluation_html()
-                return extra + _feedback_buttons_html() + text
+                return extra + _feedback_buttons_html(card.id, _current_variant_id) + text
 
             return text
     except Exception as e:
@@ -634,15 +634,33 @@ def on_js_message(handled: tuple, message: str, context):
 
     if message.startswith("variantFeedback:"):
         try:
-            rating = int(message[len("variantFeedback:"):])
-            if _current_variant_id and _cache:
-                _cache.record_feedback(_current_variant_id, rating)
+            payload = message[len("variantFeedback:"):]
+            parts = payload.split(":")
+            if len(parts) >= 2:
+                variant_id = int(parts[0])
+                rating = int(parts[1])
+            else:
+                # Backward compatibility with older in-flight HTML.
+                variant_id = _current_variant_id
+                rating = int(payload)
+            if variant_id and _cache:
+                _cache.record_feedback(variant_id, rating)
         except Exception:
             pass
         return (True, None)
 
-    if message == "saveCardIdea":
-        _save_current_idea()
+    if message.startswith("saveCardIdea"):
+        card_id = None
+        variant_id = None
+        if ":" in message:
+            try:
+                _, card_s, variant_s = message.split(":", 2)
+                card_id = int(card_s)
+                variant_id = int(variant_s)
+            except Exception:
+                card_id = None
+                variant_id = None
+        _save_current_idea(card_id=card_id, variant_id=variant_id)
         return (True, None)
 
     if message == "startGrading":
@@ -831,7 +849,7 @@ def _wrap_variant_html(variant: str) -> str:
     """
 
 
-def _feedback_buttons_html() -> str:
+def _feedback_buttons_html(card_id: int, variant_id: int) -> str:
     """Thumbs up/down buttons for rating variant quality, plus bookmark."""
     return """
     <div class="variant-feedback" style="
@@ -845,7 +863,7 @@ def _feedback_buttons_html() -> str:
         <span id="vf-label">Good variant?</span>
         <button id="vf-up" onclick="
             try {
-                pycmd('variantFeedback:1');
+                pycmd('variantFeedback:%d:1');
                 document.getElementById('vf-up').style.opacity='1';
                 document.getElementById('vf-down').style.opacity='0.3';
                 document.getElementById('vf-label').textContent='Saved';
@@ -856,7 +874,7 @@ def _feedback_buttons_html() -> str:
         " title="Good variant">&#128077;</button>
         <button id="vf-down" onclick="
             try {
-                pycmd('variantFeedback:-1');
+                pycmd('variantFeedback:%d:-1');
                 document.getElementById('vf-down').style.opacity='1';
                 document.getElementById('vf-up').style.opacity='0.3';
                 document.getElementById('vf-label').textContent='Saved';
@@ -868,7 +886,7 @@ def _feedback_buttons_html() -> str:
         <span style="border-left: 1px solid #ccc; height: 1.2em; margin: 0 4px;"></span>
         <button id="vf-save" onclick="
             try {
-                pycmd('saveCardIdea');
+                pycmd('saveCardIdea:%d:%d');
                 var btn = document.getElementById('vf-save');
                 btn.textContent = '\\u2713';
                 btn.disabled = true;
@@ -879,7 +897,7 @@ def _feedback_buttons_html() -> str:
             font-size: 1.3em; opacity: 0.5; padding: 2px 6px;
         " title="Save card idea">&#128278;</button>
     </div>
-    """
+    """ % (int(variant_id), int(variant_id), int(card_id), int(variant_id))
 
 
 def _freeform_input_html() -> str:
@@ -1113,35 +1131,51 @@ def _idea_has_feedback(idea):
     return bool(str(evaluation).strip())
 
 
-def _save_current_idea():
-    """Save the current variant as a card idea."""
+def _save_current_idea(card_id=None, variant_id=None):
+    # type: (Optional[int], Optional[int]) -> None
+    """Save the current (or explicitly identified) variant as a card idea."""
     global _ideas_saved_this_session
     try:
-        if not _current_variant or _current_card_id is None or not _cache:
+        if not _cache:
             return
 
-        card = mw.col.get_card(_current_card_id)
+        target_card_id = card_id if card_id is not None else _current_card_id
+        target_variant_id = variant_id if variant_id is not None else _current_variant_id
+        variant_text = _current_variant
+        rating = None
+
+        if target_variant_id is not None:
+            with _cache._lock:
+                row = _cache._conn.execute(
+                    "SELECT card_id, variant_text, rating FROM variants WHERE id = ?",
+                    (target_variant_id,),
+                ).fetchone()
+                if row:
+                    db_card_id, db_variant_text, db_rating = row
+                    target_card_id = int(db_card_id)
+                    variant_text = str(db_variant_text or "")
+                    rating = db_rating
+
+        if not variant_text or target_card_id is None:
+            return
+
+        card = mw.col.get_card(int(target_card_id))
+        if not card:
+            return
         orig_q = _extract_text(card, "question")
         orig_a = _extract_text(card, "answer")
 
-        # Read current rating from variants table if available
-        rating = None
-        if _current_variant_id is not None:
-            with _cache._lock:
-                row = _cache._conn.execute(
-                    "SELECT rating FROM variants WHERE id = ?",
-                    (_current_variant_id,),
-                ).fetchone()
-                if row:
-                    rating = row[0]
+        evaluation = None
+        if _current_card_id == target_card_id:
+            evaluation = _evaluation_text
 
         _cache.save_idea(
-            card_id=_current_card_id,
-            variant_text=_current_variant,
+            card_id=target_card_id,
+            variant_text=variant_text,
             original_question=orig_q,
             original_answer=orig_a,
             rating=rating,
-            evaluation=_evaluation_text,
+            evaluation=evaluation,
         )
         _ideas_saved_this_session += 1
         tooltip("Card idea saved")
