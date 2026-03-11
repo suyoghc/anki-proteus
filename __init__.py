@@ -12,6 +12,7 @@ Two modes:
 import html
 import json
 import os
+import time as _time
 from aqt import mw, gui_hooks
 from aqt.utils import showInfo, tooltip
 from aqt.qt import QAction, QThread, pyqtSignal, QObject
@@ -28,6 +29,18 @@ from .batch_prefetch import BatchPrefetchManager
 
 ADDON_DIR = os.path.dirname(__file__)
 CONFIG_PATH = os.path.join(ADDON_DIR, "config.json")
+_LOG_PATH = os.path.join(ADDON_DIR, "proteus_diag.log")
+
+def _log(msg: str):
+    """Append a timestamped line to the diag log (only when debug_logging is on)."""
+    if not CONFIG.get("debug_logging", False):
+        return
+    ts = _time.strftime("%H:%M:%S")
+    try:
+        with open(_LOG_PATH, "a") as f:
+            f.write(f"{ts} {msg}\n")
+    except Exception:
+        pass
 
 def load_config():
     """Load config, merging user overrides with defaults."""
@@ -43,6 +56,7 @@ def load_config():
         "batch_prefetch_count": 15,        # cards to pre-generate on session start (0 = off)
         "batch_prefetch_concurrency": 3,   # max simultaneous API calls
         "show_prefetch_progress": True,    # show tooltip progress during batch prefetch
+        "debug_logging": False,            # write to proteus_diag.log
     }
     conf = mw.addonManager.getConfig(__name__)
     if conf:
@@ -104,6 +118,10 @@ def toggle_response_mode():
     else:
         CONFIG["response_mode"] = "flip"
         tooltip("Proteus: flip mode (standard review)")
+
+    # Re-render the current question so the input box appears/disappears
+    if _current_variant and mw.reviewer:
+        mw.reviewer._showQuestion()
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +334,7 @@ def _prefetch_next_card():
 
 def on_state_did_change(new_state: str, old_state: str):
     """Start batch prefetch when entering review, cancel when leaving."""
+    _log(f"state_did_change: {old_state} -> {new_state}")
     if new_state == "review":
         _start_batch_prefetch()
     elif old_state == "review":
@@ -333,25 +352,31 @@ def _start_batch_prefetch():
     try:
         queued = mw.col.sched.get_queued_cards(fetch_limit=count)
     except Exception as e:
-        print(f"[Proteus] Batch prefetch: could not get queued cards: {e}")
+        _log(f"batch: could not get queued cards: {e}")
         return
 
     if not queued or not queued.cards:
+        _log("batch: no cards in queue")
         return
 
+    _log(f"batch: {len(queued.cards)} cards from scheduler")
     concurrency = CONFIG.get("batch_prefetch_concurrency", 3)
+    debug = CONFIG.get("debug_logging", False)
     _batch_manager = BatchPrefetchManager(
         cache=_cache,
         config=CONFIG,
         max_concurrent=concurrency,
+        debug=debug,
     )
 
     enqueued = 0
     for entry in queued.cards:
         card = mw.col.get_card(entry.card.id)
         if not should_prefetch(card):
+            _log(f"  skip {card.id} (not eligible)")
             continue
         if _cache.has_variant(card.id):
+            _log(f"  skip {card.id} (already cached)")
             continue
 
         question = _extract_text(card, "question")
@@ -360,8 +385,11 @@ def _start_batch_prefetch():
         enqueued += 1
 
     if enqueued == 0:
+        _log("batch: all cards already cached or ineligible")
         _batch_manager = None
         return
+
+    _log(f"batch: enqueued {enqueued} cards, concurrency={concurrency}")
 
     if CONFIG.get("show_prefetch_progress", True):
         _batch_manager.progress.connect(_on_batch_progress)
@@ -380,6 +408,7 @@ def _on_batch_progress(completed, total):
 
 
 def _on_batch_done():
+    _log("batch: all done")
     if CONFIG.get("show_prefetch_progress", True):
         tooltip("Proteus: variants ready")
 
@@ -388,6 +417,7 @@ def _cancel_batch_prefetch():
     """Cancel any in-progress batch prefetch."""
     global _batch_manager
     if _batch_manager:
+        _log("batch: cancelled (left reviewer)")
         _batch_manager.cancel()
         _batch_manager = None
 

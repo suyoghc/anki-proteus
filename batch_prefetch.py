@@ -7,8 +7,10 @@ All collection access (card text extraction) happens on the main thread
 before items are enqueued — workers only receive plain strings.
 """
 
+import os
 import queue
 import threading
+import time as _time
 from typing import List, Optional
 
 from aqt.qt import QObject, QThread, pyqtSignal
@@ -16,19 +18,32 @@ from aqt.qt import QObject, QThread, pyqtSignal
 from .generator import generate_variant
 from .cache import VariantCache
 
+_LOG_PATH = os.path.join(os.path.dirname(__file__), "proteus_diag.log")
+
+def _log(msg, debug=True):
+    if not debug:
+        return
+    ts = _time.strftime("%H:%M:%S")
+    try:
+        with open(_LOG_PATH, "a") as f:
+            f.write(f"{ts} {msg}\n")
+    except Exception:
+        pass
+
 
 class _BatchWorker(QThread):
     """Worker thread that pulls items from a shared queue and generates variants."""
 
     item_done = pyqtSignal(int)  # card_id
 
-    def __init__(self, work_queue, cache, config, cancel_event, parent=None):
-        # type: (queue.Queue, VariantCache, dict, threading.Event, Optional[QObject]) -> None
+    def __init__(self, work_queue, cache, config, cancel_event, debug=False, parent=None):
+        # type: (queue.Queue, VariantCache, dict, threading.Event, bool, Optional[QObject]) -> None
         super().__init__(parent)
         self._queue = work_queue
         self._cache = cache
         self._config = config
         self._cancel = cancel_event
+        self._debug = debug
 
     def run(self):
         while not self._cancel.is_set():
@@ -41,6 +56,7 @@ class _BatchWorker(QThread):
 
             # Another worker (or single-card prefetch) may have filled this
             if self._cache.has_variant(card_id):
+                _log(f"worker: card {card_id} already cached, skipping", self._debug)
                 self.item_done.emit(card_id)
                 continue
 
@@ -52,8 +68,11 @@ class _BatchWorker(QThread):
                 )
                 if variant:
                     self._cache.store_variant(card_id, variant)
+                    _log(f"worker: card {card_id} done ({len(variant)} chars)", self._debug)
+                else:
+                    _log(f"worker: card {card_id} generation returned None", self._debug)
             except Exception as e:
-                print(f"[Proteus] Batch worker error for card {card_id}: {e}")
+                _log(f"worker error for card {card_id}: {e}", self._debug)
 
             self.item_done.emit(card_id)
 
@@ -69,12 +88,13 @@ class BatchPrefetchManager(QObject):
     progress = pyqtSignal(int, int)  # (completed, total)
     all_done = pyqtSignal()
 
-    def __init__(self, cache, config, max_concurrent=3, parent=None):
-        # type: (VariantCache, dict, int, Optional[QObject]) -> None
+    def __init__(self, cache, config, max_concurrent=3, debug=False, parent=None):
+        # type: (VariantCache, dict, int, bool, Optional[QObject]) -> None
         super().__init__(parent)
         self._cache = cache
         self._config = config
         self._max_concurrent = max_concurrent
+        self._debug = debug
         self._queue = queue.Queue()  # type: queue.Queue
         self._cancel_event = threading.Event()
         self._workers = []  # type: List[_BatchWorker]
@@ -98,7 +118,7 @@ class BatchPrefetchManager(QObject):
         for _ in range(num_workers):
             worker = _BatchWorker(
                 self._queue, self._cache, self._config,
-                self._cancel_event, parent=self,
+                self._cancel_event, debug=self._debug, parent=self,
             )
             worker.item_done.connect(self._on_item_done)
             worker.finished.connect(self._on_worker_finished)

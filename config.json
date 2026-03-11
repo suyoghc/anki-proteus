@@ -9,5 +9,6 @@
     "system_prompt": "",
     "batch_prefetch_count": 15,
     "batch_prefetch_concurrency": 3,
-    "show_prefetch_progress": true
+    "show_prefetch_progress": true,
+    "debug_logging": false
 }
