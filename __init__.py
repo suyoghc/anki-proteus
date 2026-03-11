@@ -60,6 +60,9 @@ def load_config():
         "debug_logging": False,            # write to proteus_diag.log
         "usage_budget": 5.00,              # monthly budget in USD (for progress bar)
         "submit_delay_ms": 750,            # ms delay after Enter before flipping to answer
+        "grading_model": "",               # optional override for grading model
+        "grading_max_tokens": 120,         # smaller grading response for speed
+        "grading_timeout_s": 10,           # fail fast if grading is slow
     }
     conf = mw.addonManager.getConfig(__name__)
     if conf:
@@ -81,7 +84,9 @@ _current_card_id: int = None
 _user_response: str = ""              # captured from freeform text input
 _evaluation_text: str = None          # LLM grading result
 _grading_worker = None                # background grading QThread
+_grading_watchdog_seq: int = 0        # invalidate prior grading watchdog timers
 _ideas_saved_this_session: int = 0
+_idea_orphan_workers = []             # workers kept alive after ideas dialog closes
 
 # ---------------------------------------------------------------------------
 # Initialization
@@ -305,7 +310,8 @@ def on_question_shown(card):
 
 class _GradingWorker(QThread):
     """Background worker for LLM grading so the UI doesn't freeze."""
-    done = pyqtSignal(int, str)  # (card_id, evaluation_json)
+    done = pyqtSignal(object, str)    # (card_id, evaluation_json)
+    failed = pyqtSignal(object, str)  # (card_id, error_message)
 
     def __init__(self, card_id, variant_question, user_response, canonical_answer, config):
         super().__init__()
@@ -325,8 +331,10 @@ class _GradingWorker(QThread):
             )
             if result:
                 self.done.emit(self._card_id, json.dumps(result))
+            else:
+                self.failed.emit(self._card_id, "LLM grading timed out or failed")
         except Exception as e:
-            print(f"[Proteus] Grading failed: {e}")
+            self.failed.emit(self._card_id, str(e))
 
 
 def _cleanup_grading_worker():
@@ -337,8 +345,87 @@ def _cleanup_grading_worker():
             _grading_worker.done.disconnect()
         except (TypeError, RuntimeError):
             pass
+        try:
+            _grading_worker.failed.disconnect()
+        except (TypeError, RuntimeError):
+            pass
         _grading_worker.deleteLater()
         _grading_worker = None
+
+
+def _set_evaluation_message(message):
+    # type: (str) -> None
+    """Render a plain message in the evaluation box."""
+    if not (mw.reviewer and mw.reviewer.web):
+        return
+    rendered = (
+        "<span style='color: #666; font-style: italic;'>"
+        + html.escape(message)
+        + "</span>"
+    )
+    js_str = json.dumps(rendered)
+    js = f"""
+    (function() {{
+        var el = document.getElementById('variant-evaluation');
+        if (el) {{
+            el.innerHTML = {js_str};
+        }}
+    }})();
+    """
+    mw.reviewer.web.eval(js)
+
+
+def _card_ids_match(card_id):
+    # type: (object) -> bool
+    """Robustly compare signal card id with current card id."""
+    try:
+        return int(card_id) == int(_current_card_id)
+    except Exception:
+        return str(card_id) == str(_current_card_id)
+
+
+def _render_saved_evaluation():
+    # type: () -> Optional[str]
+    """Return rendered HTML for any saved evaluation text, or None."""
+    if not _evaluation_text:
+        return None
+    try:
+        data = json.loads(_evaluation_text)
+        return _render_evaluation_html(data)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return html.escape(str(_evaluation_text)).replace("\n", "<br>")
+
+
+def _cancel_grading_watchdog():
+    # type: () -> None
+    """Invalidate any pending grading watchdog callbacks."""
+    global _grading_watchdog_seq
+    _grading_watchdog_seq += 1
+
+
+def _start_grading_watchdog(card_id):
+    # type: (int) -> None
+    """Show fallback text if grading gets stuck beyond timeout budget."""
+    global _grading_watchdog_seq
+    _grading_watchdog_seq += 1
+    seq = _grading_watchdog_seq
+    timeout_s = float(CONFIG.get("grading_timeout_s", 10))
+    delay_ms = int((timeout_s + 2.0) * 1000)
+
+    def _watchdog_fire():
+        # type: () -> None
+        if seq != _grading_watchdog_seq:
+            return
+        if card_id != _current_card_id:
+            return
+        if _grading_worker and _grading_worker.isRunning():
+            _log(f"grading watchdog fired for card {card_id}")
+            _set_evaluation_message(
+                "Evaluation is taking longer than expected. "
+                "You can grade manually."
+            )
+
+    QTimer.singleShot(delay_ms, _watchdog_fire)
 
 
 def _render_evaluation_html(data):
@@ -417,12 +504,14 @@ def _on_grading_done(card_id, evaluation_json):
     """Callback on main thread when grading finishes."""
     global _evaluation_text
 
-    still_on_card = (card_id == _current_card_id)
+    still_on_card = _card_ids_match(card_id)
 
     if not still_on_card:
         _log(f"grading: discarding stale evaluation for card {card_id} "
              f"(current is {_current_card_id})")
         return
+
+    _cancel_grading_watchdog()
 
     # Only persist evaluation if it belongs to the current card
     _evaluation_text = evaluation_json
@@ -446,6 +535,19 @@ def _on_grading_done(card_id, evaluation_json):
         """
         _log(f"grading: injecting evaluation ({len(rendered)} chars)")
         mw.reviewer.web.eval(js)
+
+
+def _on_grading_failed(card_id, error_message):
+    # type: (object, str) -> None
+    """Show fallback text when grading fails/times out."""
+    global _evaluation_text
+    still_on_card = _card_ids_match(card_id)
+    if not still_on_card:
+        return
+    _cancel_grading_watchdog()
+    _log(f"grading failed for card {card_id}: {error_message}")
+    _evaluation_text = "Evaluation unavailable (timeout). You can still grade manually."
+    _set_evaluation_message(_evaluation_text)
 
 
 def _start_early_grading():
@@ -473,7 +575,9 @@ def _start_early_grading():
             config=CONFIG,
         )
         _grading_worker.done.connect(_on_grading_done)
+        _grading_worker.failed.connect(_on_grading_failed)
         _grading_worker.start()
+        _start_grading_watchdog(_current_card_id)
     except Exception as e:
         _log(f"early grading failed: {e}")
 
@@ -482,32 +586,38 @@ def on_answer_shown(card):
     """After answer shown in freeform mode, trigger async grading if not already started."""
     global _grading_worker
 
-    _log(f"on_answer_shown: mode={CONFIG.get('response_mode')}, "
-         f"variant={'yes' if _current_variant else 'no'}, "
-         f"response={len(_user_response)} chars")
+    if CONFIG.get("response_mode") != "freeform" or not _current_variant:
+        return
 
-    if (CONFIG.get("response_mode") == "freeform"
-            and _current_variant
-            and _user_response.strip()):
+    _log(f"on_answer_shown freeform: card={card.id}, response={len(_user_response)} chars")
 
-        # Skip if early grading already started for this card
-        if _grading_worker and _grading_worker.isRunning():
-            _log("grading: already running (early start)")
-            return
+    if not _user_response.strip():
+        global _evaluation_text
+        _evaluation_text = "No response captured. Type or dictate in the box, then press Enter."
+        _cancel_grading_watchdog()
+        _set_evaluation_message(_evaluation_text)
+        return
 
-        _cleanup_grading_worker()
+    # Skip if early grading already started for this card
+    if _grading_worker and _grading_worker.isRunning():
+        _log("grading: already running (early start)")
+        return
 
-        answer_text = _extract_text(card, "answer")
-        _log(f"grading: starting worker for card {card.id}")
-        _grading_worker = _GradingWorker(
-            card_id=card.id,
-            variant_question=_current_variant,
-            user_response=_user_response,
-            canonical_answer=answer_text,
-            config=CONFIG,
-        )
-        _grading_worker.done.connect(_on_grading_done)
-        _grading_worker.start()
+    _cleanup_grading_worker()
+
+    answer_text = _extract_text(card, "answer")
+    _log(f"grading: starting worker for card {card.id}")
+    _grading_worker = _GradingWorker(
+        card_id=card.id,
+        variant_question=_current_variant,
+        user_response=_user_response,
+        canonical_answer=answer_text,
+        config=CONFIG,
+    )
+    _grading_worker.done.connect(_on_grading_done)
+    _grading_worker.failed.connect(_on_grading_failed)
+    _grading_worker.start()
+    _start_grading_watchdog(card.id)
 
 
 # ---------------------------------------------------------------------------
@@ -813,7 +923,10 @@ def _freeform_input_html() -> str:
 
 
 def _evaluation_html() -> str:
-    """Placeholder HTML for the LLM evaluation (populated via JS after grading)."""
+    """Evaluation box HTML, using saved evaluation when already available."""
+    rendered = _render_saved_evaluation()
+    if not rendered:
+        rendered = '<span style="color: #888;">&#9203; Evaluating your response...</span>'
     return """
     <div id="variant-evaluation" style="
         margin-bottom: 16px;
@@ -824,9 +937,9 @@ def _evaluation_html() -> str:
         font-size: 0.9em;
         line-height: 1.5;
     ">
-        <span style="color: #888;">&#9203; Evaluating your response...</span>
+        {rendered}
     </div>
-    """
+    """.format(rendered=rendered)
 
 
 # ---------------------------------------------------------------------------
@@ -850,6 +963,116 @@ def _extract_text(card, side: str) -> str:
 # ---------------------------------------------------------------------------
 # Card ideas
 # ---------------------------------------------------------------------------
+
+_IDEA_REASON_TAGS = [
+    ("", "No tag"),
+    ("unclear", "Unclear"),
+    ("too_easy", "Too easy"),
+    ("too_hard", "Too hard"),
+    ("awkward_wording", "Awkward wording"),
+    ("duplicate_concept", "Duplicate concept"),
+    ("promising_direction", "Promising direction"),
+]
+
+
+def _idea_working_text(idea):
+    # type: (dict) -> str
+    """Return edited draft if present, otherwise the original generated variant."""
+    edited = idea.get("edited_variant_text")
+    if edited and edited.strip():
+        return edited.strip()
+    return str(idea.get("variant_text", "")).strip()
+
+
+def _regenerate_idea_variant(idea, instruction, current_text):
+    # type: (dict, str, Optional[str]) -> Optional[str]
+    """Regenerate a variant with an explicit human instruction."""
+    if not CONFIG.get("api_key"):
+        return None
+
+    cfg = dict(CONFIG)
+    base = cfg.get("system_prompt", "").strip()
+    extra_parts = [
+        "Human editing request for this single rewrite:",
+        instruction,
+    ]
+    if current_text:
+        extra_parts.extend([
+            "",
+            "Current draft variant:",
+            current_text.strip()[:500],
+        ])
+    extra_parts.extend([
+        "",
+        "Keep the same underlying concept and answer target.",
+        "Return only the rewritten question text.",
+    ])
+    extra = "\n".join(extra_parts)
+    cfg["system_prompt"] = f"{base}\n\n{extra}" if base else extra
+
+    return generate_variant(
+        question=str(idea.get("original_question", "")),
+        answer=str(idea.get("original_answer", "")),
+        config=cfg,
+    )
+
+
+class _IdeaRegenerateWorker(QThread):
+    """Background worker for directed idea regeneration in the card ideas dialog."""
+    done = pyqtSignal(int, str)    # idea_id, regenerated_text
+    failed = pyqtSignal(int, str)  # idea_id, error_message
+
+    def __init__(self, idea_id, idea, instruction, current_text):
+        # type: (int, dict, str, str) -> None
+        super().__init__()
+        self._idea_id = idea_id
+        self._idea = dict(idea)
+        self._instruction = instruction
+        self._current_text = current_text
+
+    def run(self):
+        try:
+            regenerated = _regenerate_idea_variant(
+                self._idea,
+                self._instruction,
+                self._current_text,
+            )
+            if regenerated:
+                self.done.emit(self._idea_id, regenerated)
+            else:
+                self.failed.emit(self._idea_id, "empty regeneration result")
+        except Exception as e:
+            self.failed.emit(self._idea_id, str(e))
+
+
+def _decision_label(status):
+    # type: (str) -> str
+    labels = {
+        "pending": "Pending",
+        "edited_pending": "Edited (pending)",
+        "accepted": "Accepted",
+        "edited_accepted": "Edited + accepted",
+        "rejected": "Rejected",
+    }
+    return labels.get(status, status.replace("_", " ").title())
+
+
+def _selected_reason(combo):
+    # type: (object) -> Optional[str]
+    reason = combo.currentData()
+    if not reason:
+        return None
+    return str(reason)
+
+
+def _idea_has_feedback(idea):
+    # type: (dict) -> bool
+    """True only when an idea includes non-empty grading feedback."""
+    evaluation = idea.get("evaluation")
+    if evaluation is None:
+        return False
+    return bool(str(evaluation).strip())
+
 
 def _save_current_idea():
     """Save the current variant as a card idea."""
@@ -893,6 +1116,7 @@ def show_card_ideas_dialog():
         from aqt.qt import (
             QDialog, QVBoxLayout, QHBoxLayout, QLabel,
             QPushButton, QScrollArea, QWidget, QFrame,
+            QComboBox, QPlainTextEdit,
         )
 
         if not _cache:
@@ -922,6 +1146,7 @@ def show_card_ideas_dialog():
         outer.addWidget(close_btn)
 
         dlg.setLayout(outer)
+        regen_workers = []  # type: list
 
         def refresh():
             # Clear existing widgets
@@ -947,9 +1172,46 @@ def show_card_ideas_dialog():
                 frame.setStyleSheet("QFrame { margin-bottom: 6px; padding: 8px; }")
                 fl = QVBoxLayout()
 
-                variant_lbl = QLabel(f"<b>{html.escape(idea['variant_text'])}</b>")
-                variant_lbl.setWordWrap(True)
-                fl.addWidget(variant_lbl)
+                raw_variant = str(idea.get("variant_text", ""))
+                working_variant = _idea_working_text(idea)
+                decision_status = str(idea.get("decision_status", "pending"))
+                decision_reason = idea.get("decision_reason")
+                has_feedback = _idea_has_feedback(idea)
+
+                status_lbl = QLabel(
+                    f"<span style='color: #555;'><b>Status:</b> "
+                    f"{html.escape(_decision_label(decision_status))}</span>"
+                )
+                status_lbl.setWordWrap(True)
+                fl.addWidget(status_lbl)
+
+                raw_lbl = QLabel(
+                    f"<span style='color: #666;'><b>Original variant:</b> "
+                    f"{html.escape(raw_variant[:260])}</span>"
+                )
+                raw_lbl.setWordWrap(True)
+                fl.addWidget(raw_lbl)
+
+                draft_lbl = QLabel("<span style='color: #444;'><b>Working draft (editable)</b></span>")
+                draft_lbl.setWordWrap(True)
+                fl.addWidget(draft_lbl)
+
+                draft_edit = QPlainTextEdit()
+                draft_edit.setPlainText(working_variant)
+                draft_edit.setMinimumHeight(72)
+                fl.addWidget(draft_edit)
+
+                tag_row = QHBoxLayout()
+                tag_row.addWidget(QLabel("Tag:"))
+                reason_combo = QComboBox()
+                for key, label in _IDEA_REASON_TAGS:
+                    reason_combo.addItem(label, key)
+                if decision_reason:
+                    idx = reason_combo.findData(decision_reason)
+                    if idx >= 0:
+                        reason_combo.setCurrentIndex(idx)
+                tag_row.addWidget(reason_combo)
+                fl.addLayout(tag_row)
 
                 orig_q_lbl = QLabel(
                     f"<span style='color: #888;'>Q: {html.escape(idea['original_question'][:200])}</span>"
@@ -989,27 +1251,190 @@ def show_card_ideas_dialog():
                     except (json.JSONDecodeError, ValueError):
                         pass
 
+                regen_row = QHBoxLayout()
+                short_btn = QPushButton("Shorter")
+                concrete_btn = QPushButton("More Concrete")
+                jargon_btn = QPushButton("Less Jargon")
+                contrast_btn = QPushButton("Add Contrast Case")
+                regen_row.addWidget(short_btn)
+                regen_row.addWidget(concrete_btn)
+                regen_row.addWidget(jargon_btn)
+                regen_row.addWidget(contrast_btn)
+                fl.addLayout(regen_row)
+                regen_buttons = [short_btn, concrete_btn, jargon_btn, contrast_btn]
+
                 btn_row = QHBoxLayout()
+                save_btn = QPushButton("Save Edit")
                 create_btn = QPushButton("Create Card")
-                dismiss_btn = QPushButton("Dismiss")
+                dismiss_btn = QPushButton("Reject")
+                if not has_feedback:
+                    create_btn.setEnabled(False)
+                    create_btn.setToolTip(
+                        "Requires freeform grading feedback "
+                        "(from Wispr/typed response)."
+                    )
 
                 idea_id = idea['id']
 
-                def make_create(i=idea, iid=idea_id):
+                def make_regen(i=idea, iid=idea_id, editor=draft_edit,
+                               reason=reason_combo, status=status_lbl):
+                    # type: (dict, int, QPlainTextEdit, QComboBox, QLabel) -> object
+                    def set_regen_enabled(enabled):
+                        # type: (bool) -> None
+                        for btn in regen_buttons:
+                            btn.setEnabled(enabled)
+
+                    def on_click(instruction):
+                        current = editor.toPlainText().strip()
+                        if not current:
+                            tooltip("Proteus: draft cannot be empty")
+                            return
+                        set_regen_enabled(False)
+                        status.setText(
+                            "<span style='color: #555;'><b>Status:</b> "
+                            "Regenerating...</span>"
+                        )
+                        worker = _IdeaRegenerateWorker(iid, i, instruction, current)
+                        regen_workers.append(worker)
+
+                        def on_done(done_iid, regenerated):
+                            # type: (int, str) -> None
+                            if done_iid != iid:
+                                return
+                            _cache.update_idea_edit(iid, regenerated)
+                            _cache.set_idea_decision(
+                                iid,
+                                "edited_pending",
+                                _selected_reason(reason),
+                                mark_used=False,
+                            )
+                            try:
+                                editor.setPlainText(regenerated)
+                                status.setText(
+                                    "<span style='color: #555;'><b>Status:</b> "
+                                    "Edited (pending)</span>"
+                                )
+                            except RuntimeError:
+                                pass
+                            tooltip("Proteus: regenerated draft saved")
+
+                        def on_failed(failed_iid, msg):
+                            # type: (int, str) -> None
+                            if failed_iid != iid:
+                                return
+                            try:
+                                status.setText(
+                                    "<span style='color: #555;'><b>Status:</b> "
+                                    "Pending</span>"
+                                )
+                            except RuntimeError:
+                                pass
+                            _log(f"idea regeneration failed for {iid}: {msg}")
+                            tooltip("Proteus: regeneration failed")
+
+                        def on_finished():
+                            # type: () -> None
+                            global _idea_orphan_workers
+                            try:
+                                set_regen_enabled(True)
+                            except RuntimeError:
+                                pass
+                            try:
+                                regen_workers.remove(worker)
+                            except ValueError:
+                                pass
+                            try:
+                                _idea_orphan_workers.remove(worker)
+                            except ValueError:
+                                pass
+                            worker.deleteLater()
+
+                        worker.done.connect(on_done)
+                        worker.failed.connect(on_failed)
+                        worker.finished.connect(on_finished)
+                        worker.start()
+                    return on_click
+
+                def make_save(iid=idea_id, editor=draft_edit, reason=reason_combo,
+                              original_text=raw_variant):
+                    # type: (int, QPlainTextEdit, QComboBox, str) -> object
                     def on_click():
-                        _open_add_note_with_idea(i)
-                        _cache.mark_idea_used(iid)
+                        edited = editor.toPlainText().strip()
+                        if not edited:
+                            tooltip("Proteus: draft cannot be empty")
+                            return
+                        status = "edited_pending" if edited != original_text.strip() else "pending"
+                        _cache.update_idea_edit(iid, edited)
+                        _cache.set_idea_decision(
+                            iid,
+                            status,
+                            _selected_reason(reason),
+                            mark_used=False,
+                        )
+                        tooltip("Proteus: draft saved")
                         refresh()
                     return on_click
 
-                def make_dismiss(iid=idea_id):
+                def make_create(i=idea, iid=idea_id, editor=draft_edit,
+                                reason=reason_combo, original_text=raw_variant):
+                    # type: (dict, int, QPlainTextEdit, QComboBox, str) -> object
                     def on_click():
-                        _cache.mark_idea_used(iid)
+                        if not _idea_has_feedback(i):
+                            tooltip("Proteus: Create Card requires freeform feedback first")
+                            return
+                        edited = editor.toPlainText().strip()
+                        if not edited:
+                            tooltip("Proteus: draft cannot be empty")
+                            return
+                        edited_accept = edited != original_text.strip()
+                        status = "edited_accepted" if edited_accept else "accepted"
+                        _cache.update_idea_edit(iid, edited)
+                        _cache.set_idea_decision(
+                            iid,
+                            status,
+                            _selected_reason(reason),
+                            mark_used=True,
+                        )
+                        idea_for_create = dict(i)
+                        idea_for_create["variant_text"] = edited
+                        idea_for_create["edited_variant_text"] = edited
+                        _open_add_note_with_idea(idea_for_create)
                         refresh()
                     return on_click
 
+                def make_dismiss(iid=idea_id, editor=draft_edit, reason=reason_combo):
+                    # type: (int, QPlainTextEdit, QComboBox) -> object
+                    def on_click():
+                        edited = editor.toPlainText().strip()
+                        if edited:
+                            _cache.update_idea_edit(iid, edited)
+                        _cache.set_idea_decision(
+                            iid,
+                            "rejected",
+                            _selected_reason(reason),
+                            mark_used=True,
+                        )
+                        refresh()
+                    return on_click
+
+                regen_handler = make_regen()
+                short_btn.clicked.connect(lambda _=False, h=regen_handler: h(
+                    "Rewrite this to be shorter and simpler without losing the tested concept."
+                ))
+                concrete_btn.clicked.connect(lambda _=False, h=regen_handler: h(
+                    "Rewrite with a concrete real-world scenario while testing the same idea."
+                ))
+                jargon_btn.clicked.connect(lambda _=False, h=regen_handler: h(
+                    "Rewrite with less jargon and clearer wording at the same difficulty."
+                ))
+                contrast_btn.clicked.connect(lambda _=False, h=regen_handler: h(
+                    "Rewrite by adding a contrast or failure case that still targets the same answer."
+                ))
+
+                save_btn.clicked.connect(make_save())
                 create_btn.clicked.connect(make_create())
                 dismiss_btn.clicked.connect(make_dismiss())
+                btn_row.addWidget(save_btn)
                 btn_row.addWidget(create_btn)
                 btn_row.addWidget(dismiss_btn)
                 fl.addLayout(btn_row)
@@ -1019,6 +1444,31 @@ def show_card_ideas_dialog():
 
             ideas_layout.addStretch()
 
+        def _wait_for_regen_workers(_result=0):
+            # type: (int) -> None
+            global _idea_orphan_workers
+            for worker in list(regen_workers):
+                if worker.isRunning():
+                    worker.wait(5000)
+                if worker.isRunning():
+                    # Keep a reference so a running QThread is not destroyed.
+                    _idea_orphan_workers.append(worker)
+
+                    def _cleanup_orphan(w=worker):
+                        # type: (object) -> None
+                        global _idea_orphan_workers
+                        try:
+                            _idea_orphan_workers.remove(w)
+                        except ValueError:
+                            pass
+                        w.deleteLater()
+
+                    worker.finished.connect(_cleanup_orphan)
+                    continue
+                worker.deleteLater()
+            regen_workers[:] = []
+
+        dlg.finished.connect(_wait_for_regen_workers)
         refresh()
         dlg.exec()
     except Exception as e:
@@ -1028,13 +1478,17 @@ def show_card_ideas_dialog():
 def _open_add_note_with_idea(idea):
     """Open the Add Note dialog pre-filled with an idea's content."""
     try:
+        if not _idea_has_feedback(idea):
+            tooltip("Proteus: cannot create card without freeform feedback")
+            return
         from aqt.addcards import AddCards
 
         add_dlg = AddCards(mw)
         try:
             note = add_dlg.editor.note
             if note and len(note.fields) >= 2:
-                note.fields[0] = idea['variant_text']
+                front = idea.get('edited_variant_text') or idea.get('variant_text', '')
+                note.fields[0] = front
                 note.fields[1] = idea['original_answer']
                 add_dlg.editor.loadNote()
         except Exception:

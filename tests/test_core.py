@@ -25,7 +25,7 @@ from cache import VariantCache  # noqa: E402
 # against the real source, not a copy.
 _init_source = open(os.path.join(ADDON_DIR, "__init__.py")).read()
 _tree = ast.parse(_init_source)
-_target_funcs = {"_estimate_cost", "_budget_pct", "_budget_bar_text"}
+_target_funcs = {"_estimate_cost", "_budget_pct", "_budget_bar_text", "_idea_has_feedback"}
 _func_nodes = [
     n for n in ast.iter_child_nodes(_tree)
     if isinstance(n, ast.FunctionDef) and n.name in _target_funcs
@@ -37,6 +37,7 @@ exec(compile(_mod, "__init__.py", "exec"), _ns)
 _estimate_cost = _ns["_estimate_cost"]
 _budget_pct = _ns["_budget_pct"]
 _budget_bar_text = _ns["_budget_bar_text"]
+_idea_has_feedback = _ns["_idea_has_feedback"]
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +116,100 @@ class TestUsageTracker:
 
 
 # ===========================================================================
-# 7-12  Variant cache (cache.py)
+# 7-8  Grading config path (generator.py)
+# ===========================================================================
+
+class TestGradingConfig:
+
+    def test_grade_response_uses_fast_defaults(self, monkeypatch):
+        """grade_response should call API with grading defaults."""
+        captured = {}
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            captured["api_key"] = api_key
+            captured["model"] = model
+            captured["max_tokens"] = max_tokens
+            captured["timeout_s"] = timeout_s
+            return '{"correct":[],"incorrect":[],"missed":[],"overall":"ok","score":3}'
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert captured["api_key"] == "k"
+        assert captured["model"] == "m"
+        assert captured["max_tokens"] == 120
+        assert captured["timeout_s"] == 10
+        assert out["score"] == 3
+
+    def test_grade_response_honors_overrides(self, monkeypatch):
+        """grading_model/max_tokens/timeout overrides should be passed through."""
+        captured = {}
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            captured["model"] = model
+            captured["max_tokens"] = max_tokens
+            captured["timeout_s"] = timeout_s
+            return '{"correct":[],"incorrect":[],"missed":[],"overall":"ok","score":4}'
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={
+                "api_key": "k",
+                "model": "slow-model",
+                "grading_model": "fast-model",
+                "grading_max_tokens": 120,
+                "grading_timeout_s": 6,
+            },
+        )
+
+        assert captured["model"] == "fast-model"
+        assert captured["max_tokens"] == 120
+        assert captured["timeout_s"] == 6
+        assert out["score"] == 4
+
+    def test_grade_response_falls_back_to_base_model(self, monkeypatch):
+        """If grading override fails, grade_response retries once on base model."""
+        calls = []
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            calls.append((model, max_tokens, timeout_s))
+            if model == "bad-fast-model":
+                return None
+            return '{"correct":[],"incorrect":[],"missed":[],"overall":"ok","score":5}'
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={
+                "api_key": "k",
+                "model": "base-model",
+                "grading_model": "bad-fast-model",
+                "grading_max_tokens": 120,
+                "grading_timeout_s": 10,
+            },
+        )
+
+        assert calls[0][0] == "bad-fast-model"
+        assert calls[1][0] == "base-model"
+        assert calls[1][2] == 10  # fallback uses a slightly higher timeout floor
+        assert out["score"] == 5
+
+
+# ===========================================================================
+# 9-14  Variant cache (cache.py)
 # ===========================================================================
 
 class TestVariantCache:
@@ -257,7 +351,22 @@ class TestCostBudget:
 
 
 # ===========================================================================
-# 16-22  Card ideas (cache.py)
+# 16  Feedback gate helper (__init__.py)
+# ===========================================================================
+
+class TestIdeaFeedbackGate:
+
+    def test_idea_has_feedback(self):
+        """Create-card gate requires non-empty evaluation text."""
+        assert not _idea_has_feedback({"evaluation": None})
+        assert not _idea_has_feedback({"evaluation": ""})
+        assert not _idea_has_feedback({"evaluation": "   "})
+        assert _idea_has_feedback({"evaluation": '{"overall":"ok","score":3}'})
+        assert _idea_has_feedback({"evaluation": "fallback text"})
+
+
+# ===========================================================================
+# 17-23  Card ideas (cache.py)
 # ===========================================================================
 
 class TestCardIdeas:
@@ -288,6 +397,9 @@ class TestCardIdeas:
         assert idea["original_answer"] == "Paris"
         assert idea["rating"] == 1
         assert idea["used"] == 0
+        assert idea["edited_variant_text"] is None
+        assert idea["decision_status"] == "pending"
+        assert idea["decision_reason"] is None
 
     def test_mark_idea_used(self, cache):
         """Mark idea used -> excluded from default get_ideas, included with flag."""
@@ -318,6 +430,28 @@ class TestCardIdeas:
         idea_id = cache.save_idea(1, "V", "Q", "A")
         ideas = cache.get_ideas()
         assert ideas[0]["rating"] is None
+
+    def test_update_idea_edit(self, cache):
+        """Human-edited idea text is persisted and retrievable."""
+        idea_id = cache.save_idea(1, "Original", "Q", "A")
+        cache.update_idea_edit(idea_id, "Edited by human")
+        idea = cache.get_ideas(include_used=True)[0]
+        assert idea["edited_variant_text"] == "Edited by human"
+
+    def test_set_idea_decision(self, cache):
+        """Decision status/reason saved, optionally marking idea used."""
+        idea_id = cache.save_idea(1, "V", "Q", "A")
+        cache.set_idea_decision(idea_id, "edited_accepted", "awkward_wording")
+        idea = cache.get_ideas(include_used=True)[0]
+        assert idea["decision_status"] == "edited_accepted"
+        assert idea["decision_reason"] == "awkward_wording"
+        assert idea["used"] == 0
+
+        cache.set_idea_decision(idea_id, "rejected", "too_easy", mark_used=True)
+        idea = cache.get_ideas(include_used=True)[0]
+        assert idea["decision_status"] == "rejected"
+        assert idea["decision_reason"] == "too_easy"
+        assert idea["used"] == 1
 
     def test_ideas_ordered_by_created_at_desc(self, cache):
         """Most recent idea appears first."""

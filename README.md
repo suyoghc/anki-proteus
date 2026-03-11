@@ -29,6 +29,8 @@ Toggle between modes anytime with **Ctrl+Shift+V** or in the config.
 - **Variant caching**: SQLite-backed cache stores multiple variants per card, reducing live API calls
 - **Structured grading**: Freeform responses are graded into correct/incorrect/missed categories with pastel color-coded feedback
 - **Card ideas**: Save interesting variant questions as card ideas during review (bookmark button), then review and create new cards from them via **Tools → Proteus: Card Ideas**
+- **Human-in-the-loop editing**: In the Card Ideas dialog, edit draft wording, apply reason tags, and regenerate with targeted instructions (`Shorter`, `More Concrete`, `Less Jargon`, `Add Contrast Case`) before accepting/rejecting
+- **Feedback-gated creation**: `Create Card` is enabled only for ideas that include freeform grading feedback (from Wispr/typed response)
 - **Usage budget**: Set a dollar cap to limit API spend per session
 - **Image card safety**: Automatically skips cards with insufficient text (e.g., Image Occlusion)
 - **Feedback buttons**: Rate variant quality with thumbs up/down to track what works
@@ -71,7 +73,10 @@ Edit via **Tools → Add-ons → Config** or directly in `config.json`:
     "show_prefetch_progress": true,
     "debug_logging": false,
     "usage_budget": 5.00,
-    "submit_delay_ms": 750
+    "submit_delay_ms": 750,
+    "grading_model": "",
+    "grading_max_tokens": 120,
+    "grading_timeout_s": 10
 }
 ```
 
@@ -103,6 +108,12 @@ clinical vignettes and patient presentations."
 **`usage_budget`**: API spend target (in USD). The addon tracks estimated token costs and displays a progress bar against this budget in **Tools → Proteus: Usage Stats**. This is informational — it does not automatically stop generation.
 
 **`submit_delay_ms`**: Delay in milliseconds between pressing Enter in freeform mode and flipping the card. Gives the grading API call a head start so feedback arrives sooner. Default: 750.
+
+**`grading_model`**: Optional model override used only for grading. Leave empty to use `model`. If you have access to a faster model, set it here.
+
+**`grading_max_tokens`**: Max output tokens for grading response. Lower is usually faster. Default: 120.
+
+**`grading_timeout_s`**: Fail-fast timeout for grading requests. If exceeded, the UI shows a fallback message so it doesn't stay on "Evaluating...". Default: 10.
 
 ## Cost
 

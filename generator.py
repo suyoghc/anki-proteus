@@ -188,7 +188,11 @@ def grade_response(
     if not api_key:
         return None
 
-    model = config.get("model", "claude-sonnet-4-20250514")
+    base_model = config.get("model", "claude-sonnet-4-20250514")
+    override = str(config.get("grading_model", "")).strip()
+    model = override or base_model
+    max_tokens = int(config.get("grading_max_tokens", 120))
+    timeout_s = float(config.get("grading_timeout_s", 10))
 
     user_msg = GRADING_USER_TEMPLATE.format(
         question=variant_question,
@@ -198,7 +202,24 @@ def grade_response(
 
     system = GRADING_SYSTEM_PROMPT.strip()
 
-    raw = _call_api(api_key, model, system, user_msg, max_tokens=400)
+    raw = _call_api(
+        api_key,
+        model,
+        system,
+        user_msg,
+        max_tokens=max_tokens,
+        timeout_s=timeout_s,
+    )
+    if raw is None and model != base_model:
+        # If grading-model override is unavailable, retry once on the base model.
+        raw = _call_api(
+            api_key,
+            base_model,
+            system,
+            user_msg,
+            max_tokens=max_tokens,
+            timeout_s=max(timeout_s, 10),
+        )
     if raw is None:
         return None
 
@@ -233,6 +254,7 @@ def _call_api(
     system: str,
     user_message: str,
     max_tokens: int = 300,
+    timeout_s: float = 15,
 ) -> Optional[str]:
     """Make a single Anthropic API call. Returns text or None."""
     payload = {
@@ -252,7 +274,7 @@ def _call_api(
     req = urllib.request.Request(API_URL, data=data, headers=headers, method="POST")
 
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             result = json.loads(resp.read().decode("utf-8"))
             # Record token usage
             usage = result.get("usage", {})
