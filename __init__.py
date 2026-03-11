@@ -299,30 +299,33 @@ def _prefetch_next_card():
     if not CONFIG.get("api_key"):
         return
 
-    reviewer = mw.reviewer
-    if not reviewer:
+    if not mw.reviewer:
         return
 
-    # Get next card from scheduler (if available)
     try:
-        # Anki 2.1.x: access the scheduled cards
-        next_card = mw.col.sched.getCard()
-        if next_card:
-            # Put it back — we only peeked
-            mw.col.reset()
+        queued = mw.col.sched.get_queued_cards(fetch_limit=2)
+        if not queued or not queued.cards:
+            return
 
-            if should_transform(next_card) and not _cache.has_variant(next_card.id):
-                question = _extract_text(next_card, "question")
-                answer = _extract_text(next_card, "answer")
+        # First card is the current one; take the second if available
+        entries = list(queued.cards)
+        if len(entries) < 2:
+            return
 
-                _prefetch_worker = PrefetchWorker(
-                    card_id=next_card.id,
-                    question=question,
-                    answer=answer,
-                    config=CONFIG,
-                    cache=_cache,
-                )
-                _prefetch_worker.start()
+        next_card = mw.col.get_card(entries[1].card.id)
+
+        if should_prefetch(next_card) and not _cache.has_variant(next_card.id):
+            question = _extract_text(next_card, "question")
+            answer = _extract_text(next_card, "answer")
+
+            _prefetch_worker = PrefetchWorker(
+                card_id=next_card.id,
+                question=question,
+                answer=answer,
+                config=CONFIG,
+                cache=_cache,
+            )
+            _prefetch_worker.start()
     except Exception:
         # Pre-fetching is best-effort; never break the review flow
         pass
