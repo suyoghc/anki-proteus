@@ -91,6 +91,13 @@ class VariantCache:
                 )
             except sqlite3.OperationalError:
                 pass  # column already exists
+            # Migration: add edited answer text if missing
+            try:
+                self._conn.execute(
+                    "ALTER TABLE card_ideas ADD COLUMN edited_answer_text TEXT DEFAULT NULL"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
             self._conn.commit()
 
     def get_variant(self, card_id: int) -> Optional[Tuple[int, str]]:
@@ -194,19 +201,20 @@ class VariantCache:
 
     def save_idea(self, card_id, variant_text, original_question,
                   original_answer, rating=None, evaluation=None,
-                  edited_variant_text=None):
-        # type: (int, str, str, str, Optional[int], Optional[str], Optional[str]) -> int
+                  edited_variant_text=None, edited_answer_text=None):
+        # type: (int, str, str, str, Optional[int], Optional[str], Optional[str], Optional[str]) -> int
         """Save a card idea. Returns the new row id."""
         with self._lock:
             cursor = self._conn.execute(
                 """INSERT INTO card_ideas
                    (card_id, variant_text, original_question,
                     original_answer, rating, created_at, used, evaluation,
-                    edited_variant_text, decision_status, decision_reason)
-                   VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 'pending', NULL)""",
+                    edited_variant_text, edited_answer_text,
+                    decision_status, decision_reason)
+                   VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'pending', NULL)""",
                 (card_id, variant_text, original_question,
                  original_answer, rating, time.time(), evaluation,
-                 edited_variant_text),
+                 edited_variant_text, edited_answer_text),
             )
             self._conn.commit()
             return cursor.lastrowid
@@ -219,20 +227,23 @@ class VariantCache:
                 rows = self._conn.execute(
                     "SELECT id, card_id, variant_text, original_question, "
                     "original_answer, rating, created_at, used, evaluation, "
-                    "edited_variant_text, decision_status, decision_reason "
+                    "edited_variant_text, edited_answer_text, "
+                    "decision_status, decision_reason "
                     "FROM card_ideas ORDER BY created_at DESC"
                 ).fetchall()
             else:
                 rows = self._conn.execute(
                     "SELECT id, card_id, variant_text, original_question, "
                     "original_answer, rating, created_at, used, evaluation, "
-                    "edited_variant_text, decision_status, decision_reason "
+                    "edited_variant_text, edited_answer_text, "
+                    "decision_status, decision_reason "
                     "FROM card_ideas WHERE used = 0 ORDER BY created_at DESC"
                 ).fetchall()
             cols = [
                 "id", "card_id", "variant_text", "original_question",
                 "original_answer", "rating", "created_at", "used",
-                "evaluation", "edited_variant_text", "decision_status",
+                "evaluation", "edited_variant_text", "edited_answer_text",
+                "decision_status",
                 "decision_reason",
             ]
             return [dict(zip(cols, row)) for row in rows]
@@ -244,6 +255,16 @@ class VariantCache:
             self._conn.execute(
                 "UPDATE card_ideas SET edited_variant_text = ? WHERE id = ?",
                 (edited_variant_text, idea_id),
+            )
+            self._conn.commit()
+
+    def update_idea_answer_edit(self, idea_id, edited_answer_text):
+        # type: (int, str) -> None
+        """Persist the latest human-edited answer wording for an idea."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE card_ideas SET edited_answer_text = ? WHERE id = ?",
+                (edited_answer_text, idea_id),
             )
             self._conn.commit()
 

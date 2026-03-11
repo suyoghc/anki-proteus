@@ -984,6 +984,15 @@ def _idea_working_text(idea):
     return str(idea.get("variant_text", "")).strip()
 
 
+def _idea_working_answer(idea):
+    # type: (dict) -> str
+    """Return edited answer draft if present, otherwise the original answer."""
+    edited = idea.get("edited_answer_text")
+    if edited and edited.strip():
+        return edited.strip()
+    return str(idea.get("original_answer", "")).strip()
+
+
 def _regenerate_idea_variant(idea, instruction, current_text):
     # type: (dict, str, Optional[str]) -> Optional[str]
     """Regenerate a variant with an explicit human instruction."""
@@ -1174,6 +1183,8 @@ def show_card_ideas_dialog():
 
                 raw_variant = str(idea.get("variant_text", ""))
                 working_variant = _idea_working_text(idea)
+                original_answer = str(idea.get("original_answer", ""))
+                working_answer = _idea_working_answer(idea)
                 decision_status = str(idea.get("decision_status", "pending"))
                 decision_reason = idea.get("decision_reason")
                 has_feedback = _idea_has_feedback(idea)
@@ -1220,10 +1231,26 @@ def show_card_ideas_dialog():
                 fl.addWidget(orig_q_lbl)
 
                 orig_a_lbl = QLabel(
-                    f"<span style='color: #888;'>A: {html.escape(idea['original_answer'][:200])}</span>"
+                    f"<span style='color: #888;'>Original A: {html.escape(original_answer[:200])}</span>"
                 )
                 orig_a_lbl.setWordWrap(True)
                 fl.addWidget(orig_a_lbl)
+
+                answer_draft_lbl = QLabel(
+                    "<span style='color: #444;'><b>Answer draft (editable)</b></span>"
+                )
+                answer_draft_lbl.setWordWrap(True)
+                fl.addWidget(answer_draft_lbl)
+
+                answer_edit = QPlainTextEdit()
+                answer_edit.setPlainText(working_answer)
+                answer_edit.setMinimumHeight(64)
+                fl.addWidget(answer_edit)
+
+                answer_btn_row = QHBoxLayout()
+                answer_reset_btn = QPushButton("Reset Answer")
+                answer_btn_row.addWidget(answer_reset_btn)
+                fl.addLayout(answer_btn_row)
 
                 if idea['rating'] is not None:
                     badge = "\U0001f44d" if idea['rating'] > 0 else "\U0001f44e"
@@ -1356,15 +1383,23 @@ def show_card_ideas_dialog():
                     return on_click
 
                 def make_save(iid=idea_id, editor=draft_edit, reason=reason_combo,
-                              original_text=raw_variant):
-                    # type: (int, QPlainTextEdit, QComboBox, str) -> object
+                              original_text=raw_variant, answer_editor=answer_edit,
+                              original_answer_text=original_answer):
+                    # type: (int, QPlainTextEdit, QComboBox, str, QPlainTextEdit, str) -> object
                     def on_click():
                         edited = editor.toPlainText().strip()
+                        edited_answer = answer_editor.toPlainText().strip()
                         if not edited:
                             tooltip("Proteus: draft cannot be empty")
                             return
-                        status = "edited_pending" if edited != original_text.strip() else "pending"
+                        if not edited_answer:
+                            tooltip("Proteus: answer draft cannot be empty")
+                            return
+                        question_changed = edited != original_text.strip()
+                        answer_changed = edited_answer != original_answer_text.strip()
+                        status = "edited_pending" if (question_changed or answer_changed) else "pending"
                         _cache.update_idea_edit(iid, edited)
+                        _cache.update_idea_answer_edit(iid, edited_answer)
                         _cache.set_idea_decision(
                             iid,
                             status,
@@ -1376,19 +1411,28 @@ def show_card_ideas_dialog():
                     return on_click
 
                 def make_create(i=idea, iid=idea_id, editor=draft_edit,
-                                reason=reason_combo, original_text=raw_variant):
-                    # type: (dict, int, QPlainTextEdit, QComboBox, str) -> object
+                                reason=reason_combo, original_text=raw_variant,
+                                answer_editor=answer_edit, original_answer_text=original_answer):
+                    # type: (dict, int, QPlainTextEdit, QComboBox, str, QPlainTextEdit, str) -> object
                     def on_click():
                         if not _idea_has_feedback(i):
                             tooltip("Proteus: Create Card requires freeform feedback first")
                             return
                         edited = editor.toPlainText().strip()
+                        edited_answer = answer_editor.toPlainText().strip()
                         if not edited:
                             tooltip("Proteus: draft cannot be empty")
                             return
-                        edited_accept = edited != original_text.strip()
+                        if not edited_answer:
+                            tooltip("Proteus: answer draft cannot be empty")
+                            return
+                        edited_accept = (
+                            edited != original_text.strip()
+                            or edited_answer != original_answer_text.strip()
+                        )
                         status = "edited_accepted" if edited_accept else "accepted"
                         _cache.update_idea_edit(iid, edited)
+                        _cache.update_idea_answer_edit(iid, edited_answer)
                         _cache.set_idea_decision(
                             iid,
                             status,
@@ -1398,16 +1442,21 @@ def show_card_ideas_dialog():
                         idea_for_create = dict(i)
                         idea_for_create["variant_text"] = edited
                         idea_for_create["edited_variant_text"] = edited
+                        idea_for_create["edited_answer_text"] = edited_answer
                         _open_add_note_with_idea(idea_for_create)
                         refresh()
                     return on_click
 
-                def make_dismiss(iid=idea_id, editor=draft_edit, reason=reason_combo):
-                    # type: (int, QPlainTextEdit, QComboBox) -> object
+                def make_dismiss(iid=idea_id, editor=draft_edit, reason=reason_combo,
+                                 answer_editor=answer_edit):
+                    # type: (int, QPlainTextEdit, QComboBox, QPlainTextEdit) -> object
                     def on_click():
                         edited = editor.toPlainText().strip()
+                        edited_answer = answer_editor.toPlainText().strip()
                         if edited:
                             _cache.update_idea_edit(iid, edited)
+                        if edited_answer:
+                            _cache.update_idea_answer_edit(iid, edited_answer)
                         _cache.set_idea_decision(
                             iid,
                             "rejected",
@@ -1415,6 +1464,12 @@ def show_card_ideas_dialog():
                             mark_used=True,
                         )
                         refresh()
+                    return on_click
+
+                def make_reset_answer(answer_editor=answer_edit, original_answer_text=original_answer):
+                    # type: (QPlainTextEdit, str) -> object
+                    def on_click():
+                        answer_editor.setPlainText(original_answer_text)
                     return on_click
 
                 regen_handler = make_regen()
@@ -1434,6 +1489,7 @@ def show_card_ideas_dialog():
                 save_btn.clicked.connect(make_save())
                 create_btn.clicked.connect(make_create())
                 dismiss_btn.clicked.connect(make_dismiss())
+                answer_reset_btn.clicked.connect(make_reset_answer())
                 btn_row.addWidget(save_btn)
                 btn_row.addWidget(create_btn)
                 btn_row.addWidget(dismiss_btn)
@@ -1488,8 +1544,9 @@ def _open_add_note_with_idea(idea):
             note = add_dlg.editor.note
             if note and len(note.fields) >= 2:
                 front = idea.get('edited_variant_text') or idea.get('variant_text', '')
+                back = idea.get('edited_answer_text') or idea.get('original_answer', '')
                 note.fields[0] = front
-                note.fields[1] = idea['original_answer']
+                note.fields[1] = back
                 add_dlg.editor.loadNote()
         except Exception:
             pass  # different note types may have different layouts
