@@ -283,7 +283,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
         elif kind.endswith("Answer"):
             if _current_variant and _current_variant_id is not None:
                 extra = ""
-                if CONFIG.get("response_mode") == "freeform":
+                if CONFIG.get("response_mode") == "freeform" and _user_response.strip():
                     extra = _evaluation_html()
                 return extra + _feedback_buttons_html() + text
 
@@ -416,13 +416,6 @@ def _render_evaluation_html(data):
 def _on_grading_done(card_id, evaluation_json):
     """Callback on main thread when grading finishes."""
     global _evaluation_text
-    _evaluation_text = evaluation_json
-
-    try:
-        data = json.loads(evaluation_json)
-        rendered = _render_evaluation_html(data)
-    except (json.JSONDecodeError, ValueError):
-        rendered = html.escape(evaluation_json).replace("\n", "<br>")
 
     still_on_card = (card_id == _current_card_id)
 
@@ -430,6 +423,15 @@ def _on_grading_done(card_id, evaluation_json):
         _log(f"grading: discarding stale evaluation for card {card_id} "
              f"(current is {_current_card_id})")
         return
+
+    # Only persist evaluation if it belongs to the current card
+    _evaluation_text = evaluation_json
+
+    try:
+        data = json.loads(evaluation_json)
+        rendered = _render_evaluation_html(data)
+    except (json.JSONDecodeError, ValueError):
+        rendered = html.escape(evaluation_json).replace("\n", "<br>")
 
     if mw.reviewer and mw.reviewer.web:
         # json.dumps produces a valid JS string literal (with quotes)

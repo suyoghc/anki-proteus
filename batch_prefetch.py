@@ -154,9 +154,10 @@ class BatchPrefetchManager(QObject):
                 self._queue.get_nowait()
             except queue.Empty:
                 break
-        # Wait for workers to finish so they aren't destroyed while running
+        # Wait for workers to finish so they aren't destroyed while running.
+        # API calls can block up to 15s, so allow 20s per worker.
         for w in self._workers:
-            w.wait(5000)  # 5s timeout per worker
+            w.wait(20000)
 
     def _poll_progress(self):
         """Called on main thread by QTimer. Check worker progress."""

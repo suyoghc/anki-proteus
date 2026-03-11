@@ -100,7 +100,7 @@ clinical vignettes and patient presentations."
 
 **`debug_logging`**: Write detailed diagnostic logs to `proteus_diag.log` in the addon folder.
 
-**`usage_budget`**: Maximum API spend (in USD) per session. The addon tracks estimated token costs and stops generating variants when the budget is reached.
+**`usage_budget`**: API spend target (in USD). The addon tracks estimated token costs and displays a progress bar against this budget in **Tools → Proteus: Usage Stats**. This is informational — it does not automatically stop generation.
 
 **`submit_delay_ms`**: Delay in milliseconds between pressing Enter in freeform mode and flipping the card. Gives the grading API call a head start so feedback arrives sooner. Default: 750.
 
