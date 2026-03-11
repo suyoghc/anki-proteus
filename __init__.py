@@ -993,6 +993,36 @@ def _idea_working_answer(idea):
     return str(idea.get("original_answer", "")).strip()
 
 
+def _card_shape_guardrail_issues(question_text, answer_text):
+    # type: (str, str) -> list
+    """Return blocking issues for non-atomic card shapes."""
+    import re
+
+    question = str(question_text or "").strip()
+    answer = str(answer_text or "").strip()
+    issues = []
+
+    if question.count("?") > 1:
+        issues.append("question has multiple asks (more than one '?').")
+
+    # Catch patterns like "What ... and what ..." that usually encode two prompts.
+    if re.search(r"\b(and|or)\s+(what|which|why|how|when|where|who)\b", question.lower()):
+        issues.append("question appears to chain multiple prompts.")
+
+    answer_lines = [ln.strip() for ln in answer.splitlines() if ln.strip()]
+    if len(answer_lines) >= 3:
+        issues.append("answer spans several lines and likely contains multiple facts.")
+
+    answer_parts = [p.strip() for p in re.split(r"[;,]", answer) if p.strip()]
+    if len(answer_parts) >= 4 and len(answer.split()) > 18:
+        issues.append("answer looks like a list; split into separate cards.")
+
+    if len(answer.split()) > 45:
+        issues.append("answer is too long for a focused recall target.")
+
+    return issues
+
+
 def _regenerate_idea_variant(idea, instruction, current_text):
     # type: (dict, str, Optional[str]) -> Optional[str]
     """Regenerate a variant with an explicit human instruction."""
@@ -1425,6 +1455,17 @@ def show_card_ideas_dialog():
                             return
                         if not edited_answer:
                             tooltip("Proteus: answer draft cannot be empty")
+                            return
+                        issues = _card_shape_guardrail_issues(edited, edited_answer)
+                        if issues:
+                            suffix = ""
+                            if len(issues) > 1:
+                                suffix = " (+{} more)".format(len(issues) - 1)
+                            tooltip(
+                                "Proteus: guardrail blocked create: {}{}".format(
+                                    issues[0], suffix
+                                )
+                            )
                             return
                         edited_accept = (
                             edited != original_text.strip()
