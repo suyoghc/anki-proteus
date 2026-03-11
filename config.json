@@ -12,5 +12,6 @@
     "batch_prefetch_concurrency": 3,
     "show_prefetch_progress": true,
     "debug_logging": false,
-    "usage_budget": 5.00
+    "usage_budget": 5.00,
+    "submit_delay_ms": 750
 }

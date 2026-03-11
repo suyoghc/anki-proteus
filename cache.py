@@ -63,6 +63,13 @@ class VariantCache:
                 CREATE INDEX IF NOT EXISTS idx_card_ideas_used
                 ON card_ideas (used)
             """)
+            # Migration: add evaluation column if missing
+            try:
+                self._conn.execute(
+                    "ALTER TABLE card_ideas ADD COLUMN evaluation TEXT DEFAULT NULL"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
             self._conn.commit()
 
     def get_variant(self, card_id: int) -> Optional[Tuple[int, str]]:
@@ -165,17 +172,17 @@ class VariantCache:
     # ------------------------------------------------------------------
 
     def save_idea(self, card_id, variant_text, original_question,
-                  original_answer, rating=None):
-        # type: (int, str, str, str, Optional[int]) -> int
+                  original_answer, rating=None, evaluation=None):
+        # type: (int, str, str, str, Optional[int], Optional[str]) -> int
         """Save a card idea. Returns the new row id."""
         with self._lock:
             cursor = self._conn.execute(
                 """INSERT INTO card_ideas
                    (card_id, variant_text, original_question,
-                    original_answer, rating, created_at, used)
-                   VALUES (?, ?, ?, ?, ?, ?, 0)""",
+                    original_answer, rating, created_at, used, evaluation)
+                   VALUES (?, ?, ?, ?, ?, ?, 0, ?)""",
                 (card_id, variant_text, original_question,
-                 original_answer, rating, time.time()),
+                 original_answer, rating, time.time(), evaluation),
             )
             self._conn.commit()
             return cursor.lastrowid
@@ -196,6 +203,7 @@ class VariantCache:
             cols = [
                 "id", "card_id", "variant_text", "original_question",
                 "original_answer", "rating", "created_at", "used",
+                "evaluation",
             ]
             return [dict(zip(cols, row)) for row in rows]
 

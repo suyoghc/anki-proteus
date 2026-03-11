@@ -149,13 +149,18 @@ Rules:
 - The response may be voice-transcribed: ignore filler words, disfluencies, grammar
   issues, and informal phrasing. Evaluate ONLY conceptual correctness.
 - Compare against the canonical answer provided.
-- Be encouraging but honest. If they got it right, say so briefly. If they missed
-  something important, point out what specifically.
-- Keep your evaluation to 2-3 sentences max.
+- Be encouraging but honest.
 - Do NOT repeat the full answer back to them — they'll see the original answer
   alongside your evaluation.
-- Return ONLY your evaluation text. No preamble or labels.
-"""
+
+Return your evaluation as a JSON object with exactly these keys:
+- "correct": array of strings — key points the learner got right (empty array if none)
+- "incorrect": array of strings — things the learner stated incorrectly (empty array if none)
+- "missed": array of strings — important points from the canonical answer that the learner did not mention (empty array if none)
+- "overall": string — 1 sentence summary of their performance
+- "score": integer 1 to 5 (1=completely wrong, 3=partial, 5=perfect)
+
+Keep each bullet point to one concise sentence. Return ONLY the JSON object, no markdown fences."""
 
 GRADING_USER_TEMPLATE = """Question shown: {question}
 
@@ -163,7 +168,7 @@ Canonical answer: {answer}
 
 Learner's response: {response}
 
-Evaluate their response."""
+Evaluate their response as JSON."""
 
 
 def grade_response(
@@ -171,11 +176,13 @@ def grade_response(
     user_response: str,
     canonical_answer: str,
     config: dict,
-) -> Optional[str]:
+) -> Optional[dict]:
     """
     Grade a freeform response against the canonical answer.
 
-    Returns evaluation text, or None on failure.
+    Returns a dict with keys: correct, incorrect, missed, overall, score.
+    Falls back to {"overall": raw_text, ...} if JSON parsing fails.
+    Returns None on API failure.
     """
     api_key = config.get("api_key", "")
     if not api_key:
@@ -191,7 +198,29 @@ def grade_response(
 
     system = GRADING_SYSTEM_PROMPT.strip()
 
-    return _call_api(api_key, model, system, user_msg, max_tokens=200)
+    raw = _call_api(api_key, model, system, user_msg, max_tokens=400)
+    if raw is None:
+        return None
+
+    try:
+        data = json.loads(raw)
+        # Validate expected keys exist with correct types
+        return {
+            "correct": list(data.get("correct", [])),
+            "incorrect": list(data.get("incorrect", [])),
+            "missed": list(data.get("missed", [])),
+            "overall": str(data.get("overall", "")),
+            "score": int(data.get("score", 3)),
+        }
+    except (json.JSONDecodeError, ValueError, TypeError):
+        # LLM didn't return valid JSON — wrap raw text as fallback
+        return {
+            "correct": [],
+            "incorrect": [],
+            "missed": [],
+            "overall": raw,
+            "score": 0,
+        }
 
 
 # ---------------------------------------------------------------------------

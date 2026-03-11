@@ -59,6 +59,7 @@ def load_config():
         "show_prefetch_progress": True,    # show tooltip progress during batch prefetch
         "debug_logging": False,            # write to proteus_diag.log
         "usage_budget": 5.00,              # monthly budget in USD (for progress bar)
+        "submit_delay_ms": 750,            # ms delay after Enter before flipping to answer
     }
     conf = mw.addonManager.getConfig(__name__)
     if conf:
@@ -138,6 +139,8 @@ def toggle_response_mode():
                 var q = document.getElementById('variant-question');
                 if (q && !document.getElementById('variant-response-area')) {{
                     q.insertAdjacentHTML('afterend', `{escaped_html}`);
+                    var ta = document.getElementById('variant-response-input');
+                    if (ta) setTimeout(function() {{ ta.focus(); }}, 100);
                 }}
             }})();
             """)
@@ -158,6 +161,9 @@ def toggle_response_mode():
 # Card eligibility
 # ---------------------------------------------------------------------------
 
+_MIN_TEXT_LENGTH = 10  # cards with less extractable text are skipped
+
+
 def _is_excluded_note_type(card) -> bool:
     """Check if a card's note type is in the exclusion list."""
     try:
@@ -168,12 +174,24 @@ def _is_excluded_note_type(card) -> bool:
         return False
 
 
+def _has_enough_text(card) -> bool:
+    """Return False for image-only / media-only cards with no real text."""
+    try:
+        q = _extract_text(card, "question")
+        return len(q) >= _MIN_TEXT_LENGTH
+    except Exception:
+        return False
+
+
 def should_transform(card) -> bool:
     """Decide whether this card should get a variant."""
     if not CONFIG.get("api_key"):
         return False
 
     if _is_excluded_note_type(card):
+        return False
+
+    if not _has_enough_text(card):
         return False
 
     # Check deck filter
@@ -211,6 +229,9 @@ def should_prefetch(card) -> bool:
     if _is_excluded_note_type(card):
         return False
 
+    if not _has_enough_text(card):
+        return False
+
     # Check deck filter
     active = CONFIG.get("active_decks", [])
     if active:
@@ -235,37 +256,40 @@ def on_card_will_show(text: str, card, kind: str) -> str:
     global _current_variant, _current_variant_id, _current_card_id
     global _evaluation_text, _user_response
 
-    if kind.endswith("Question"):
-        _evaluation_text = None
-        _current_variant = None
-        _current_variant_id = None
-        _user_response = ""
-        _current_card_id = card.id
+    try:
+        if kind.endswith("Question"):
+            _evaluation_text = None
+            _current_variant = None
+            _current_variant_id = None
+            _user_response = ""
+            _current_card_id = card.id
 
-        if not should_transform(card):
+            if not should_transform(card):
+                return text
+
+            # Use cached variant only — never block the UI with a sync API call
+            result = _cache.get_variant(card.id)
+
+            if result:
+                _current_variant_id, _current_variant = result
+                styled_variant = _wrap_variant_html(_current_variant)
+                styled_variant += _feedback_buttons_html()
+                if CONFIG.get("response_mode") == "freeform":
+                    styled_variant += _freeform_input_html()
+                return styled_variant
+
             return text
 
-        # Use cached variant only — never block the UI with a sync API call
-        result = _cache.get_variant(card.id)
+        elif kind.endswith("Answer"):
+            if _current_variant and _current_variant_id is not None:
+                extra = ""
+                if CONFIG.get("response_mode") == "freeform":
+                    extra = _evaluation_html()
+                return extra + _feedback_buttons_html() + text
 
-        if result:
-            _current_variant_id, _current_variant = result
-            styled_variant = _wrap_variant_html(_current_variant)
-            styled_variant += _feedback_buttons_html()
-            if CONFIG.get("response_mode") == "freeform":
-                styled_variant += _freeform_input_html()
-            return styled_variant
-
-        return text
-
-    elif kind.endswith("Answer"):
-        if _current_variant and _current_variant_id is not None:
-            extra = ""
-            if CONFIG.get("response_mode") == "freeform":
-                extra = _evaluation_html()
-            return extra + _feedback_buttons_html() + text
-
-        return text
+            return text
+    except Exception as e:
+        _log(f"on_card_will_show error: {e}")
 
     return text
 
@@ -281,7 +305,7 @@ def on_question_shown(card):
 
 class _GradingWorker(QThread):
     """Background worker for LLM grading so the UI doesn't freeze."""
-    done = pyqtSignal(int, str)  # (card_id, evaluation_text)
+    done = pyqtSignal(int, str)  # (card_id, evaluation_json)
 
     def __init__(self, card_id, variant_question, user_response, canonical_answer, config):
         super().__init__()
@@ -300,7 +324,7 @@ class _GradingWorker(QThread):
                 config=self._config,
             )
             if result:
-                self.done.emit(self._card_id, result)
+                self.done.emit(self._card_id, json.dumps(result))
         except Exception as e:
             print(f"[Proteus] Grading failed: {e}")
 
@@ -317,38 +341,158 @@ def _cleanup_grading_worker():
         _grading_worker = None
 
 
-def _on_grading_done(card_id, evaluation):
-    """Callback on main thread when grading finishes. Only inject if card still matches."""
+def _render_evaluation_html(data):
+    # type: (dict) -> str
+    """Build color-coded HTML from structured grading data in a columnar layout."""
+    correct = data.get("correct", [])
+    incorrect = data.get("incorrect", [])
+    missed = data.get("missed", [])
+    overall = data.get("overall", "")
+    score = data.get("score", 0)
+
+    columns = [
+        (correct,   "Correct",   "#66bb6a", "#e8f5e9"),
+        (incorrect, "Incorrect", "#ef5350", "#fce4ec"),
+        (missed,    "Missed",    "#ffa726", "#fff8e1"),
+    ]
+    # Only include columns that have items
+    active = [(items, label, color, bg) for items, label, color, bg in columns if items]
+
+    if not active and not overall:
+        return html.escape(str(data))
+
+    parts = []
+
+    # Overall summary + score on top
+    if overall or score >= 1:
+        summary = ""
+        if overall:
+            summary += html.escape(overall)
+        if score >= 1:
+            if summary:
+                summary += f' &mdash; '
+            summary += f'<b>{score}/5</b>'
+        parts.append(
+            f'<div style="margin-bottom: 8px; font-style: italic; color: #555;">'
+            f'{summary}</div>'
+        )
+
+    # Separator + columnar table
+    if active:
+        if parts:
+            parts.append(
+                '<hr style="border: none; border-top: 1px solid #ddd; margin: 8px 0;">'
+            )
+        n = len(active)
+        pct = int(100 / n)
+        cells_header = ""
+        cells_body = ""
+        for items, label, color, bg in active:
+            cells_header += (
+                f'<td style="width:{pct}%; padding: 6px 8px; font-weight: bold;'
+                f' color: {color}; background: {bg}; border-bottom: 2px solid {color};'
+                f' vertical-align: top;">{label}</td>'
+            )
+            bullets = "".join(
+                f'<li style="margin-bottom: 4px;">{html.escape(str(item))}</li>'
+                for item in items
+            )
+            cells_body += (
+                f'<td style="width:{pct}%; padding: 6px 8px; vertical-align: top;">'
+                f'<ul style="margin: 0; padding: 0 0 0 14px; font-size: 0.9em;">'
+                f'{bullets}</ul></td>'
+            )
+        parts.append(
+            f'<table style="width: 100%; border-collapse: collapse;'
+            f' margin-bottom: 8px; table-layout: fixed;">'
+            f'<tr>{cells_header}</tr>'
+            f'<tr>{cells_body}</tr>'
+            f'</table>'
+        )
+
+    return "".join(parts)
+
+
+def _on_grading_done(card_id, evaluation_json):
+    """Callback on main thread when grading finishes."""
     global _evaluation_text
-    if card_id != _current_card_id:
-        return  # user advanced past this card — discard stale result
-    _evaluation_text = evaluation
+    _evaluation_text = evaluation_json
+
+    try:
+        data = json.loads(evaluation_json)
+        rendered = _render_evaluation_html(data)
+    except (json.JSONDecodeError, ValueError):
+        rendered = html.escape(evaluation_json).replace("\n", "<br>")
+
+    still_on_card = (card_id == _current_card_id)
+
     if mw.reviewer and mw.reviewer.web:
-        escaped = html.escape(evaluation).replace("\n", "<br>")
-        escaped_js = escaped.replace("\\", "\\\\").replace("'", "\\'")
+        # json.dumps produces a valid JS string literal (with quotes)
+        js_str = json.dumps(rendered)
         js = f"""
         (function() {{
             var el = document.getElementById('variant-evaluation');
             if (el) {{
-                el.innerHTML = '{escaped_js}';
-                el.style.display = 'block';
+                el.innerHTML = {js_str};
             }}
         }})();
         """
+        _log(f"grading: injecting evaluation ({len(rendered)} chars, "
+             f"{'current' if still_on_card else 'stale'})")
         mw.reviewer.web.eval(js)
 
 
-def on_answer_shown(card):
-    """After answer shown in freeform mode, trigger async grading."""
+def _start_early_grading():
+    """Start grading before answer flip so results arrive sooner."""
     global _grading_worker
+
+    if (not _current_variant or _current_card_id is None
+            or not _user_response.strip() or not _cache):
+        return
+
+    # Don't restart if already grading this card
+    if _grading_worker and _grading_worker.isRunning():
+        return
+
+    try:
+        card = mw.col.get_card(_current_card_id)
+        answer_text = _extract_text(card, "answer")
+        _cleanup_grading_worker()
+        _log(f"grading: early start for card {_current_card_id}")
+        _grading_worker = _GradingWorker(
+            card_id=_current_card_id,
+            variant_question=_current_variant,
+            user_response=_user_response,
+            canonical_answer=answer_text,
+            config=CONFIG,
+        )
+        _grading_worker.done.connect(_on_grading_done)
+        _grading_worker.start()
+    except Exception as e:
+        _log(f"early grading failed: {e}")
+
+
+def on_answer_shown(card):
+    """After answer shown in freeform mode, trigger async grading if not already started."""
+    global _grading_worker
+
+    _log(f"on_answer_shown: mode={CONFIG.get('response_mode')}, "
+         f"variant={'yes' if _current_variant else 'no'}, "
+         f"response={len(_user_response)} chars")
 
     if (CONFIG.get("response_mode") == "freeform"
             and _current_variant
             and _user_response.strip()):
 
+        # Skip if early grading already started for this card
+        if _grading_worker and _grading_worker.isRunning():
+            _log("grading: already running (early start)")
+            return
+
         _cleanup_grading_worker()
 
         answer_text = _extract_text(card, "answer")
+        _log(f"grading: starting worker for card {card.id}")
         _grading_worker = _GradingWorker(
             card_id=card.id,
             variant_question=_current_variant,
@@ -383,6 +527,10 @@ def on_js_message(handled: tuple, message: str, context):
 
     if message == "saveCardIdea":
         _save_current_idea()
+        return (True, None)
+
+    if message == "startGrading":
+        _start_early_grading()
         return (True, None)
 
     return handled
@@ -421,6 +569,10 @@ def _prefetch_next_card():
         if should_prefetch(next_card) and not _cache.has_variant(next_card.id):
             question = _extract_text(next_card, "question")
             answer = _extract_text(next_card, "answer")
+
+            # Clean up old worker before creating new one
+            if _prefetch_worker is not None:
+                _prefetch_worker.deleteLater()
 
             _prefetch_worker = PrefetchWorker(
                 card_id=next_card.id,
@@ -535,7 +687,8 @@ def _cancel_batch_prefetch():
     global _batch_manager
     if _batch_manager:
         _log("batch: cancelled (left reviewer)")
-        _batch_manager.cancel()
+        _batch_manager.cancel()  # waits for workers to finish
+        _batch_manager.deleteLater()
         _batch_manager = None
 
 
@@ -615,47 +768,56 @@ def _feedback_buttons_html() -> str:
 
 def _freeform_input_html() -> str:
     """HTML for the freeform text response area."""
-    return """
-    <div id="variant-response-area" style="
-        margin-top: 20px;
-        padding: 12px;
-        border-top: 1px solid #ddd;
-    ">
-        <div style="font-size: 0.85em; color: #666; margin-bottom: 6px;">
-            Speak or type your response:
-        </div>
-        <textarea id="variant-response-input"
-            rows="4"
-            style="
-                width: 100%;
-                box-sizing: border-box;
-                font-size: 1em;
-                padding: 8px;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                resize: vertical;
-                font-family: inherit;
-            "
-            placeholder="Click here, then use Wispr Flow or type..."
-            oninput="pycmd('variantResponse:' + this.value)"
-        ></textarea>
-    </div>
-    """
+    delay = CONFIG.get("submit_delay_ms", 750)
+    return (
+        '<div id="variant-response-area" style="'
+        'margin-top: 20px; padding: 12px; border-top: 1px solid #ddd;">'
+        '<div style="font-size: 0.85em; color: #666; margin-bottom: 6px;">'
+        'Speak or type your response:</div>'
+        '<textarea id="variant-response-input" rows="4" style="'
+        'width: 100%; box-sizing: border-box; font-size: 1em; padding: 8px;'
+        ' border: 1px solid #ccc; border-radius: 4px; resize: vertical;'
+        ' font-family: inherit;"'
+        ' placeholder="Click here, then use Wispr Flow or type..."'
+        """ oninput="pycmd('variantResponse:' + this.value)" """
+        ' onkeydown="'
+        """if (event.key === 'Enter' && !event.shiftKey) {"""
+        ' event.preventDefault(); event.stopPropagation();'
+        """ pycmd('variantResponse:' + this.value);"""
+        """ pycmd('startGrading');"""
+        " this.disabled = true; this.style.opacity = '0.5';"
+        """ setTimeout(function() { pycmd('ans'); }, """ + str(delay) + """);}"""
+        '"'
+        '></textarea></div>'
+        '<script>'
+        '(function() {'
+        ' var ta = document.getElementById("variant-response-input");'
+        ' if (ta) {'
+        '  setTimeout(function() { ta.focus(); }, 100);'
+        '  var _lastVal = "";'
+        '  setInterval(function() {'
+        '   if (ta.value !== _lastVal) { _lastVal = ta.value;'
+        '    pycmd("variantResponse:" + ta.value); }'
+        '  }, 500);'
+        ' }'
+        '})();'
+        '</script>'
+    )
 
 
 def _evaluation_html() -> str:
     """Placeholder HTML for the LLM evaluation (populated via JS after grading)."""
     return """
     <div id="variant-evaluation" style="
-        display: none;
         margin-bottom: 16px;
-        padding: 12px;
-        background: #f0f7ff;
-        border-left: 3px solid #4a90d9;
-        border-radius: 4px;
-        font-size: 0.95em;
+        padding: 12px 14px;
+        background: #f8f9fa;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        font-size: 0.9em;
+        line-height: 1.5;
     ">
-        Evaluating...
+        <span style="color: #888;">&#9203; Evaluating your response...</span>
     </div>
     """
 
@@ -710,6 +872,7 @@ def _save_current_idea():
             original_question=orig_q,
             original_answer=orig_a,
             rating=rating,
+            evaluation=_evaluation_text,
         )
         _ideas_saved_this_session += 1
         tooltip("Card idea saved")
@@ -797,6 +960,27 @@ def show_card_ideas_dialog():
                     badge = "\U0001f44d" if idea['rating'] > 0 else "\U0001f44e"
                     rating_lbl = QLabel(f"Rating: {badge}")
                     fl.addWidget(rating_lbl)
+
+                eval_json = idea.get('evaluation')
+                if eval_json:
+                    try:
+                        eval_data = json.loads(eval_json)
+                        overall = eval_data.get('overall', '')
+                        score = eval_data.get('score', 0)
+                        eval_parts = []
+                        if overall:
+                            eval_parts.append(html.escape(overall))
+                        if score >= 1:
+                            eval_parts.append(f"{score}/5")
+                        if eval_parts:
+                            eval_lbl = QLabel(
+                                f"<span style='color: #555; font-style: italic;'>"
+                                f"AI: {' &mdash; '.join(eval_parts)}</span>"
+                            )
+                            eval_lbl.setWordWrap(True)
+                            fl.addWidget(eval_lbl)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
 
                 btn_row = QHBoxLayout()
                 create_btn = QPushButton("Create Card")
