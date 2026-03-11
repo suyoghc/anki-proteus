@@ -75,9 +75,12 @@ _cache: VariantCache = None
 _prefetch_worker: PrefetchWorker = None
 _batch_manager: BatchPrefetchManager = None
 _current_variant: str = None          # variant being shown right now
+_current_variant_id: int = None       # DB row id for feedback
 _current_card_id: int = None
 _user_response: str = ""              # captured from freeform text input
 _evaluation_text: str = None          # LLM grading result
+_grading_worker = None                # background grading QThread
+_ideas_saved_this_session: int = 0
 
 # ---------------------------------------------------------------------------
 # Initialization
@@ -115,6 +118,11 @@ def init_addon():
     usage_action.triggered.connect(show_usage_dialog)
     mw.form.menuTools.addAction(usage_action)
 
+    # Add card ideas menu item
+    ideas_action = QAction("Proteus: Card Ideas", mw)
+    ideas_action.triggered.connect(show_card_ideas_dialog)
+    mw.form.menuTools.addAction(ideas_action)
+
 
 def toggle_response_mode():
     """Toggle between flip and freeform mode mid-session."""
@@ -122,13 +130,28 @@ def toggle_response_mode():
     if CONFIG["response_mode"] == "flip":
         CONFIG["response_mode"] = "freeform"
         tooltip("Proteus: freeform mode (speak/type responses)")
+        # Inject freeform input via JS if a variant is currently shown
+        if _current_variant and mw.reviewer and mw.reviewer.web:
+            escaped_html = _freeform_input_html().replace("\\", "\\\\").replace("`", "\\`")
+            mw.reviewer.web.eval(f"""
+            (function() {{
+                var q = document.getElementById('variant-question');
+                if (q && !document.getElementById('variant-response-area')) {{
+                    q.insertAdjacentHTML('afterend', `{escaped_html}`);
+                }}
+            }})();
+            """)
     else:
         CONFIG["response_mode"] = "flip"
         tooltip("Proteus: flip mode (standard review)")
-
-    # Re-render the current question so the input box appears/disappears
-    if _current_variant and mw.reviewer:
-        mw.reviewer._showQuestion()
+        # Remove freeform input via JS
+        if mw.reviewer and mw.reviewer.web:
+            mw.reviewer.web.eval("""
+            (function() {
+                var el = document.getElementById('variant-response-area');
+                if (el) el.remove();
+            })();
+            """)
 
 
 # ---------------------------------------------------------------------------
@@ -209,36 +232,26 @@ def should_prefetch(card) -> bool:
 
 def on_card_will_show(text: str, card, kind: str) -> str:
     """Intercept card display. Replace question with variant if eligible."""
-    global _current_variant, _current_card_id, _evaluation_text, _user_response
+    global _current_variant, _current_variant_id, _current_card_id
+    global _evaluation_text, _user_response
 
     if kind.endswith("Question"):
         _evaluation_text = None
         _current_variant = None
+        _current_variant_id = None
         _user_response = ""
         _current_card_id = card.id
 
         if not should_transform(card):
             return text
 
-        # Try cache first, then generate synchronously as fallback
-        question_text = _extract_text(card, "question")
-        answer_text = _extract_text(card, "answer")
+        # Use cached variant only — never block the UI with a sync API call
+        result = _cache.get_variant(card.id)
 
-        variant = _cache.get_variant(card.id)
-        if not variant:
-            variant = generate_variant(
-                question=question_text,
-                answer=answer_text,
-                config=CONFIG,
-            )
-            if variant:
-                _cache.store_variant(card.id, variant)
-            else:
-                tooltip("Proteus: variant generation failed — check API key and debug console")
-
-        if variant:
-            _current_variant = variant
-            styled_variant = _wrap_variant_html(variant)
+        if result:
+            _current_variant_id, _current_variant = result
+            styled_variant = _wrap_variant_html(_current_variant)
+            styled_variant += _feedback_buttons_html()
             if CONFIG.get("response_mode") == "freeform":
                 styled_variant += _freeform_input_html()
             return styled_variant
@@ -246,9 +259,11 @@ def on_card_will_show(text: str, card, kind: str) -> str:
         return text
 
     elif kind.endswith("Answer"):
-        if _current_variant and CONFIG.get("response_mode") == "freeform":
-            eval_html = _evaluation_html()
-            return eval_html + text
+        if _current_variant and _current_variant_id is not None:
+            extra = ""
+            if CONFIG.get("response_mode") == "freeform":
+                extra = _evaluation_html()
+            return extra + _feedback_buttons_html() + text
 
         return text
 
@@ -264,36 +279,85 @@ def on_question_shown(card):
     _prefetch_next_card()
 
 
-def on_answer_shown(card):
-    """After answer shown in freeform mode, trigger grading."""
+class _GradingWorker(QThread):
+    """Background worker for LLM grading so the UI doesn't freeze."""
+    done = pyqtSignal(int, str)  # (card_id, evaluation_text)
+
+    def __init__(self, card_id, variant_question, user_response, canonical_answer, config):
+        super().__init__()
+        self._card_id = card_id
+        self._variant_question = variant_question
+        self._user_response = user_response
+        self._canonical_answer = canonical_answer
+        self._config = config
+
+    def run(self):
+        try:
+            result = grade_response(
+                variant_question=self._variant_question,
+                user_response=self._user_response,
+                canonical_answer=self._canonical_answer,
+                config=self._config,
+            )
+            if result:
+                self.done.emit(self._card_id, result)
+        except Exception as e:
+            print(f"[Proteus] Grading failed: {e}")
+
+
+def _cleanup_grading_worker():
+    """Disconnect and schedule cleanup of any prior grading worker."""
+    global _grading_worker
+    if _grading_worker is not None:
+        try:
+            _grading_worker.done.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        _grading_worker.deleteLater()
+        _grading_worker = None
+
+
+def _on_grading_done(card_id, evaluation):
+    """Callback on main thread when grading finishes. Only inject if card still matches."""
     global _evaluation_text
+    if card_id != _current_card_id:
+        return  # user advanced past this card — discard stale result
+    _evaluation_text = evaluation
+    if mw.reviewer and mw.reviewer.web:
+        escaped = html.escape(evaluation).replace("\n", "<br>")
+        escaped_js = escaped.replace("\\", "\\\\").replace("'", "\\'")
+        js = f"""
+        (function() {{
+            var el = document.getElementById('variant-evaluation');
+            if (el) {{
+                el.innerHTML = '{escaped_js}';
+                el.style.display = 'block';
+            }}
+        }})();
+        """
+        mw.reviewer.web.eval(js)
+
+
+def on_answer_shown(card):
+    """After answer shown in freeform mode, trigger async grading."""
+    global _grading_worker
 
     if (CONFIG.get("response_mode") == "freeform"
             and _current_variant
             and _user_response.strip()):
 
+        _cleanup_grading_worker()
+
         answer_text = _extract_text(card, "answer")
-        _evaluation_text = grade_response(
+        _grading_worker = _GradingWorker(
+            card_id=card.id,
             variant_question=_current_variant,
             user_response=_user_response,
             canonical_answer=answer_text,
             config=CONFIG,
         )
-
-        # Inject evaluation into webview
-        if _evaluation_text and mw.reviewer and mw.reviewer.web:
-            escaped = html.escape(_evaluation_text).replace("\n", "<br>")
-            escaped_js = escaped.replace("\\", "\\\\").replace("'", "\\'")
-            js = f"""
-            (function() {{
-                var el = document.getElementById('variant-evaluation');
-                if (el) {{
-                    el.innerHTML = '{escaped_js}';
-                    el.style.display = 'block';
-                }}
-            }})();
-            """
-            mw.reviewer.web.eval(js)
+        _grading_worker.done.connect(_on_grading_done)
+        _grading_worker.start()
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +370,19 @@ def on_js_message(handled: tuple, message: str, context):
 
     if message.startswith("variantResponse:"):
         _user_response = message[len("variantResponse:"):]
+        return (True, None)
+
+    if message.startswith("variantFeedback:"):
+        try:
+            rating = int(message[len("variantFeedback:"):])
+            if _current_variant_id and _cache:
+                _cache.record_feedback(_current_variant_id, rating)
+        except Exception:
+            pass
+        return (True, None)
+
+    if message == "saveCardIdea":
+        _save_current_idea()
         return (True, None)
 
     return handled
@@ -337,6 +414,10 @@ def _prefetch_next_card():
 
         next_card = mw.col.get_card(entries[1].card.id)
 
+        # Skip if a previous prefetch is still running
+        if _prefetch_worker and _prefetch_worker.isRunning():
+            return
+
         if should_prefetch(next_card) and not _cache.has_variant(next_card.id):
             question = _extract_text(next_card, "question")
             answer = _extract_text(next_card, "answer")
@@ -360,11 +441,21 @@ def _prefetch_next_card():
 
 def on_state_did_change(new_state: str, old_state: str):
     """Start batch prefetch when entering review, cancel when leaving."""
+    global _ideas_saved_this_session
     _log(f"state_did_change: {old_state} -> {new_state}")
     if new_state == "review":
+        _ideas_saved_this_session = 0
         _start_batch_prefetch()
     elif old_state == "review":
         _cancel_batch_prefetch()
+        if _ideas_saved_this_session > 0:
+            n = _ideas_saved_this_session
+            s = "s" if n != 1 else ""
+            tooltip(
+                f"{n} card idea{s} saved \u2014 review via "
+                f"Tools \u2192 Proteus: Card Ideas",
+                period=5000,
+            )
 
 
 def _start_batch_prefetch():
@@ -471,6 +562,57 @@ def _wrap_variant_html(variant: str) -> str:
     """
 
 
+def _feedback_buttons_html() -> str:
+    """Thumbs up/down buttons for rating variant quality, plus bookmark."""
+    return """
+    <div class="variant-feedback" style="
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        font-size: 0.8em;
+        color: #888;
+    ">
+        <span id="vf-label">Good variant?</span>
+        <button id="vf-up" onclick="
+            try {
+                pycmd('variantFeedback:1');
+                document.getElementById('vf-up').style.opacity='1';
+                document.getElementById('vf-down').style.opacity='0.3';
+                document.getElementById('vf-label').textContent='Saved';
+            } catch(e) {}
+        " style="
+            background: none; border: none; cursor: pointer;
+            font-size: 1.3em; opacity: 0.5; padding: 2px 6px;
+        " title="Good variant">&#128077;</button>
+        <button id="vf-down" onclick="
+            try {
+                pycmd('variantFeedback:-1');
+                document.getElementById('vf-down').style.opacity='1';
+                document.getElementById('vf-up').style.opacity='0.3';
+                document.getElementById('vf-label').textContent='Saved';
+            } catch(e) {}
+        " style="
+            background: none; border: none; cursor: pointer;
+            font-size: 1.3em; opacity: 0.5; padding: 2px 6px;
+        " title="Bad variant">&#128078;</button>
+        <span style="border-left: 1px solid #ccc; height: 1.2em; margin: 0 4px;"></span>
+        <button id="vf-save" onclick="
+            try {
+                pycmd('saveCardIdea');
+                var btn = document.getElementById('vf-save');
+                btn.textContent = '\\u2713';
+                btn.disabled = true;
+                btn.title = 'Saved';
+            } catch(e) {}
+        " style="
+            background: none; border: none; cursor: pointer;
+            font-size: 1.3em; opacity: 0.5; padding: 2px 6px;
+        " title="Save card idea">&#128278;</button>
+    </div>
+    """
+
+
 def _freeform_input_html() -> str:
     """HTML for the freeform text response area."""
     return """
@@ -534,6 +676,180 @@ def _extract_text(card, side: str) -> str:
     text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
+
+
+# ---------------------------------------------------------------------------
+# Card ideas
+# ---------------------------------------------------------------------------
+
+def _save_current_idea():
+    """Save the current variant as a card idea."""
+    global _ideas_saved_this_session
+    try:
+        if not _current_variant or _current_card_id is None or not _cache:
+            return
+
+        card = mw.col.get_card(_current_card_id)
+        orig_q = _extract_text(card, "question")
+        orig_a = _extract_text(card, "answer")
+
+        # Read current rating from variants table if available
+        rating = None
+        if _current_variant_id is not None:
+            with _cache._lock:
+                row = _cache._conn.execute(
+                    "SELECT rating FROM variants WHERE id = ?",
+                    (_current_variant_id,),
+                ).fetchone()
+                if row:
+                    rating = row[0]
+
+        _cache.save_idea(
+            card_id=_current_card_id,
+            variant_text=_current_variant,
+            original_question=orig_q,
+            original_answer=orig_a,
+            rating=rating,
+        )
+        _ideas_saved_this_session += 1
+        tooltip("Card idea saved")
+    except Exception as e:
+        _log(f"save_idea failed: {e}")
+
+
+def show_card_ideas_dialog():
+    """Show dialog listing saved card ideas."""
+    try:
+        from aqt.qt import (
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+            QPushButton, QScrollArea, QWidget, QFrame,
+        )
+
+        if not _cache:
+            showInfo("Proteus: cache not initialized")
+            return
+
+        dlg = QDialog(mw)
+        dlg.setWindowTitle("Proteus: Card Ideas")
+        dlg.setMinimumWidth(480)
+        dlg.setMinimumHeight(400)
+        outer = QVBoxLayout()
+
+        header = QLabel()
+        header.setWordWrap(True)
+        outer.addWidget(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QWidget()
+        ideas_layout = QVBoxLayout()
+        container.setLayout(ideas_layout)
+        scroll.setWidget(container)
+        outer.addWidget(scroll)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        outer.addWidget(close_btn)
+
+        dlg.setLayout(outer)
+
+        def refresh():
+            # Clear existing widgets
+            while ideas_layout.count():
+                item = ideas_layout.takeAt(0)
+                w = item.widget()
+                if w:
+                    w.deleteLater()
+
+            ideas = _cache.get_ideas(include_used=False)
+            header.setText(f"<b>{len(ideas)} pending card idea{'s' if len(ideas) != 1 else ''}</b>")
+
+            if not ideas:
+                empty = QLabel("<i>No pending ideas.</i>")
+                empty.setWordWrap(True)
+                ideas_layout.addWidget(empty)
+                ideas_layout.addStretch()
+                return
+
+            for idea in ideas:
+                frame = QFrame()
+                frame.setFrameShape(QFrame.Shape.StyledPanel)
+                frame.setStyleSheet("QFrame { margin-bottom: 6px; padding: 8px; }")
+                fl = QVBoxLayout()
+
+                variant_lbl = QLabel(f"<b>{html.escape(idea['variant_text'])}</b>")
+                variant_lbl.setWordWrap(True)
+                fl.addWidget(variant_lbl)
+
+                orig_q_lbl = QLabel(
+                    f"<span style='color: #888;'>Q: {html.escape(idea['original_question'][:200])}</span>"
+                )
+                orig_q_lbl.setWordWrap(True)
+                fl.addWidget(orig_q_lbl)
+
+                orig_a_lbl = QLabel(
+                    f"<span style='color: #888;'>A: {html.escape(idea['original_answer'][:200])}</span>"
+                )
+                orig_a_lbl.setWordWrap(True)
+                fl.addWidget(orig_a_lbl)
+
+                if idea['rating'] is not None:
+                    badge = "\U0001f44d" if idea['rating'] > 0 else "\U0001f44e"
+                    rating_lbl = QLabel(f"Rating: {badge}")
+                    fl.addWidget(rating_lbl)
+
+                btn_row = QHBoxLayout()
+                create_btn = QPushButton("Create Card")
+                dismiss_btn = QPushButton("Dismiss")
+
+                idea_id = idea['id']
+
+                def make_create(i=idea, iid=idea_id):
+                    def on_click():
+                        _open_add_note_with_idea(i)
+                        _cache.mark_idea_used(iid)
+                        refresh()
+                    return on_click
+
+                def make_dismiss(iid=idea_id):
+                    def on_click():
+                        _cache.mark_idea_used(iid)
+                        refresh()
+                    return on_click
+
+                create_btn.clicked.connect(make_create())
+                dismiss_btn.clicked.connect(make_dismiss())
+                btn_row.addWidget(create_btn)
+                btn_row.addWidget(dismiss_btn)
+                fl.addLayout(btn_row)
+
+                frame.setLayout(fl)
+                ideas_layout.addWidget(frame)
+
+            ideas_layout.addStretch()
+
+        refresh()
+        dlg.exec()
+    except Exception as e:
+        showInfo(f"Proteus: card ideas dialog error: {e}")
+
+
+def _open_add_note_with_idea(idea):
+    """Open the Add Note dialog pre-filled with an idea's content."""
+    try:
+        from aqt.addcards import AddCards
+
+        add_dlg = AddCards(mw)
+        try:
+            note = add_dlg.editor.note
+            if note and len(note.fields) >= 2:
+                note.fields[0] = idea['variant_text']
+                note.fields[1] = idea['original_answer']
+                add_dlg.editor.loadNote()
+        except Exception:
+            pass  # different note types may have different layouts
+    except Exception as e:
+        showInfo(f"Proteus: could not open Add Note: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -675,9 +991,9 @@ def _try_init():
     global _initialized
     if _initialized:
         return
-    _initialized = True
     try:
         init_addon()
+        _initialized = True
     except Exception as e:
         showInfo(f"Proteus: init failed: {e}")
 

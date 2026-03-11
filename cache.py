@@ -12,7 +12,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 
 class VariantCache:
@@ -40,12 +40,35 @@ class VariantCache:
                 CREATE INDEX IF NOT EXISTS idx_card_id
                 ON variants (card_id, used)
             """)
+            # Migration: add rating column if missing
+            try:
+                self._conn.execute(
+                    "ALTER TABLE variants ADD COLUMN rating INTEGER DEFAULT NULL"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS card_ideas (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    card_id INTEGER NOT NULL,
+                    variant_text TEXT NOT NULL,
+                    original_question TEXT NOT NULL,
+                    original_answer TEXT NOT NULL,
+                    rating INTEGER DEFAULT NULL,
+                    created_at REAL NOT NULL,
+                    used INTEGER DEFAULT 0
+                )
+            """)
+            self._conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_card_ideas_used
+                ON card_ideas (used)
+            """)
             self._conn.commit()
 
-    def get_variant(self, card_id: int) -> Optional[str]:
+    def get_variant(self, card_id: int) -> Optional[Tuple[int, str]]:
         """
         Get an unused variant for a card. Marks it as used.
-        Returns None if no cached variants available.
+        Returns (variant_id, text) or None if no cached variants available.
         """
         with self._lock:
             cursor = self._conn.execute(
@@ -63,8 +86,17 @@ class VariantCache:
                     (variant_id,),
                 )
                 self._conn.commit()
-                return text
+                return (variant_id, text)
             return None
+
+    def record_feedback(self, variant_id: int, rating: int):
+        """Store user feedback for a variant. rating: 1 (up) or -1 (down)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE variants SET rating = ? WHERE id = ?",
+                (rating, variant_id),
+            )
+            self._conn.commit()
 
     def has_variant(self, card_id: int) -> bool:
         """Check if there are unused variants cached for a card."""
@@ -126,6 +158,74 @@ class VariantCache:
         """Remove all cached variants."""
         with self._lock:
             self._conn.execute("DELETE FROM variants")
+            self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Card ideas
+    # ------------------------------------------------------------------
+
+    def save_idea(self, card_id, variant_text, original_question,
+                  original_answer, rating=None):
+        # type: (int, str, str, str, Optional[int]) -> int
+        """Save a card idea. Returns the new row id."""
+        with self._lock:
+            cursor = self._conn.execute(
+                """INSERT INTO card_ideas
+                   (card_id, variant_text, original_question,
+                    original_answer, rating, created_at, used)
+                   VALUES (?, ?, ?, ?, ?, ?, 0)""",
+                (card_id, variant_text, original_question,
+                 original_answer, rating, time.time()),
+            )
+            self._conn.commit()
+            return cursor.lastrowid
+
+    def get_ideas(self, include_used=False):
+        # type: (bool) -> List[Dict]
+        """Return saved ideas as a list of dicts, newest first."""
+        with self._lock:
+            if include_used:
+                rows = self._conn.execute(
+                    "SELECT * FROM card_ideas ORDER BY created_at DESC"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM card_ideas WHERE used = 0 "
+                    "ORDER BY created_at DESC"
+                ).fetchall()
+            cols = [
+                "id", "card_id", "variant_text", "original_question",
+                "original_answer", "rating", "created_at", "used",
+            ]
+            return [dict(zip(cols, row)) for row in rows]
+
+    def mark_idea_used(self, idea_id):
+        # type: (int) -> None
+        """Mark an idea as used (dismissed or created)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE card_ideas SET used = 1 WHERE id = ?",
+                (idea_id,),
+            )
+            self._conn.commit()
+
+    def count_unseen_ideas(self):
+        # type: () -> int
+        """Count ideas that haven't been used yet."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT COUNT(*) FROM card_ideas WHERE used = 0"
+            )
+            return cursor.fetchone()[0]
+
+    def delete_idea(self, idea_id):
+        # type: (int) -> None
+        """Permanently delete an idea."""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM card_ideas WHERE id = ?",
+                (idea_id,),
+            )
             self._conn.commit()
 
     def close(self):

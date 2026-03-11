@@ -38,14 +38,15 @@ def _log(msg, debug=True):
 class _BatchWorker(QThread):
     """Worker thread that pulls items from a shared queue and generates variants."""
 
-    def __init__(self, work_queue, cache, config, cancel_event, completed_counter, debug=False, parent=None):
-        # type: (queue.Queue, VariantCache, dict, threading.Event, list, bool, Optional[QObject]) -> None
+    def __init__(self, work_queue, cache, config, cancel_event, completed_counter, counter_lock, debug=False, parent=None):
+        # type: (queue.Queue, VariantCache, dict, threading.Event, list, threading.Lock, bool, Optional[QObject]) -> None
         super().__init__(parent)
         self._queue = work_queue
         self._cache = cache
         self._config = config
         self._cancel = cancel_event
         self._completed = completed_counter  # [count] — shared mutable list
+        self._counter_lock = counter_lock
         self._debug = debug
 
     def run(self):
@@ -60,7 +61,8 @@ class _BatchWorker(QThread):
             # Another worker (or single-card prefetch) may have filled this
             if self._cache.has_variant(card_id):
                 _log(f"worker: card {card_id} already cached, skipping", self._debug)
-                self._completed[0] += 1
+                with self._counter_lock:
+                    self._completed[0] += 1
                 continue
 
             try:
@@ -77,7 +79,8 @@ class _BatchWorker(QThread):
             except Exception as e:
                 _log(f"worker error for card {card_id}: {e}", self._debug)
 
-            self._completed[0] += 1
+            with self._counter_lock:
+                self._completed[0] += 1
 
 
 class BatchPrefetchManager(QObject):
@@ -106,6 +109,7 @@ class BatchPrefetchManager(QObject):
         self._workers = []  # type: List[_BatchWorker]
         self._total = 0
         self._completed = [0]  # mutable counter shared with workers
+        self._counter_lock = threading.Lock()
         self._last_reported = 0
         self._poll_timer = None  # type: Optional[QTimer]
 
@@ -125,7 +129,7 @@ class BatchPrefetchManager(QObject):
         for _ in range(num_workers):
             worker = _BatchWorker(
                 self._queue, self._cache, self._config,
-                self._cancel_event, self._completed,
+                self._cancel_event, self._completed, self._counter_lock,
                 debug=self._debug, parent=self,
             )
             self._workers.append(worker)
@@ -153,7 +157,8 @@ class BatchPrefetchManager(QObject):
 
     def _poll_progress(self):
         """Called on main thread by QTimer. Check worker progress."""
-        completed = self._completed[0]
+        with self._counter_lock:
+            completed = self._completed[0]
 
         if completed != self._last_reported:
             self._last_reported = completed

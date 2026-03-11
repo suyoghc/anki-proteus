@@ -5,3 +5,4 @@ variant_cache.db
 meta.json
 proteus_diag.log
 usage.json
+.pytest_cache/
