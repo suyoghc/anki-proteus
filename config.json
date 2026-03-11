@@ -1,4 +1,5 @@
 {
+    "enabled": true,
     "api_key": "",
     "model": "claude-sonnet-4-20250514",
     "response_mode": "flip",

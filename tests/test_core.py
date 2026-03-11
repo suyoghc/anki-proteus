@@ -237,6 +237,86 @@ class TestGradingConfig:
         assert out["incorrect"] == []
         assert out["missed"] == []
         assert out["learning_feedback"] == ["Good related intuition."]
+        assert out["coverage_pct"] == 0
+        assert out["question_gap_points"] == ["point C"]
+
+    def test_grade_response_computes_coverage_pct(self, monkeypatch):
+        """Coverage is derived from covered/missed canonical points when omitted."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return json.dumps({
+                "alignment": "aligned",
+                "alignment_note": "",
+                "canonical_points": ["A", "B", "C"],
+                "covered_points": ["A", "B"],
+                "missed_points": ["C"],
+                "incorrect": [],
+                "learning_feedback": [],
+                "overall": "Solid response.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["coverage_pct"] == 67
+        assert out["covered_points"] == ["A", "B"]
+        assert out["missed_points"] == ["C"]
+        assert out["correct"] == ["A", "B"]
+        assert out["question_gap_points"] == ["C"]
+
+    def test_grade_response_derives_missing_gap_points_from_canonical(self, monkeypatch):
+        """If missed/question gaps are absent, derive them from canonical-covered diff."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return json.dumps({
+                "alignment": "partial",
+                "canonical_points": ["A", "B", "C"],
+                "covered_points": ["A"],
+                "coverage_pct": 33,
+                "overall": "Partial.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["coverage_pct"] == 33
+        assert out["missed_points"] == ["B", "C"]
+        assert out["question_gap_points"] == ["B", "C"]
+
+    def test_grade_response_ignores_inconsistent_raw_coverage_when_points_exist(self, monkeypatch):
+        """Coverage percent is computed from points when those points are available."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return json.dumps({
+                "alignment": "aligned",
+                "canonical_points": ["A", "B", "C"],
+                "covered_points": ["A", "B", "C"],
+                "coverage_pct": 33,
+                "overall": "Complete.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["coverage_pct"] == 100
 
     def test_grade_response_salvages_truncated_json(self, monkeypatch):
         """Truncated JSON should still return structured alignment/related feedback."""

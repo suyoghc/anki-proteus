@@ -161,23 +161,29 @@ Rules:
 Return your evaluation as a JSON object with exactly these keys:
 - "alignment": string — one of "aligned", "partial", "misaligned"
 - "alignment_note": string — short reason for the alignment judgment
+- "canonical_points": array of strings — core answer points to check
+- "covered_points": array of strings — canonical points the learner covered
+- "missed_points": array of strings — canonical points the learner missed
+- "coverage_pct": integer 0..100, based only on canonical coverage
+- "question_gap_points": array of strings — canonical points not really tested by the shown question/new expected target
 - "learning_feedback": array of strings — concise related insights (can be empty)
-- "correct": array of strings — key points the learner got right (empty array if none)
 - "incorrect": array of strings — things the learner stated incorrectly (empty array if none)
-- "missed": array of strings — important points from the canonical answer that the learner did not mention (empty array if none)
 - "overall": string — 1 sentence summary of their performance
-- "score": integer 0 to 5
 
-Scoring rule:
-- If alignment is "misaligned", set "score" to 0 and set "correct"/"incorrect"/"missed" to empty arrays.
-- Otherwise score 1 to 5 (1=completely wrong, 3=partial, 5=perfect).
+Coverage rule:
+- If alignment is "misaligned", set "coverage_pct" to 0 and set
+  "canonical_points"/"covered_points"/"missed_points"/"incorrect" to empty arrays.
+- If alignment is "misaligned", set "question_gap_points" to the key missing canonical points.
+- Otherwise ensure covered_points + missed_points map to canonical_points.
 
 Output limits (strict):
 - "alignment_note": max 18 words.
 - "overall": max 18 words.
 - Each array item: max 14 words.
 - Max 2 items in "learning_feedback".
-- Max 2 items each in "correct", "incorrect", and "missed".
+- Max 3 items each in "canonical_points", "covered_points", and "missed_points".
+- Max 3 items in "question_gap_points".
+- Max 2 items in "incorrect".
 
 Keep each bullet point to one concise sentence. Return ONLY the JSON object, no markdown fences."""
 
@@ -244,6 +250,26 @@ def _extract_json_string_list_field(raw: str, key: str, limit: int = 3) -> list:
     return items
 
 
+def _uniq_clean_list(items, limit):
+    # type: (list, int) -> list
+    """Normalize list-like values into deduplicated short string lists."""
+    if items is None:
+        items = []
+    elif not isinstance(items, (list, tuple)):
+        items = [items]
+    out = []
+    seen = set()
+    for item in items:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _normalize_grading_payload(data: dict) -> dict:
     """Normalize and guard grading payload fields."""
     alignment = str(data.get("alignment", "aligned")).strip().lower()
@@ -251,36 +277,92 @@ def _normalize_grading_payload(data: dict) -> dict:
         alignment = "aligned"
 
     alignment_note = str(data.get("alignment_note", "")).strip()
-    learning_feedback = [str(x).strip() for x in list(data.get("learning_feedback", [])) if str(x).strip()][:2]
-    correct = [str(x).strip() for x in list(data.get("correct", [])) if str(x).strip()][:2]
-    incorrect = [str(x).strip() for x in list(data.get("incorrect", [])) if str(x).strip()][:2]
-    missed = [str(x).strip() for x in list(data.get("missed", [])) if str(x).strip()][:2]
+    learning_feedback = _uniq_clean_list(data.get("learning_feedback", []), limit=2)
+    canonical_points = _uniq_clean_list(data.get("canonical_points", []), limit=3)
+    covered_points = _uniq_clean_list(
+        data.get("covered_points", data.get("correct", [])),
+        limit=3,
+    )
+    missed_points = _uniq_clean_list(
+        data.get("missed_points", data.get("missed", [])),
+        limit=3,
+    )
+    question_gap_points = _uniq_clean_list(data.get("question_gap_points", []), limit=3)
+    incorrect = _uniq_clean_list(data.get("incorrect", []), limit=2)
     overall = str(data.get("overall", "")).strip()
 
+    if not canonical_points:
+        canonical_points = _uniq_clean_list(covered_points + missed_points, limit=3)
+
+    if canonical_points:
+        canonical_set = set(canonical_points)
+        if not covered_points and missed_points:
+            missed_set = set(missed_points)
+            covered_points = [p for p in canonical_points if p not in missed_set]
+        if not missed_points and covered_points:
+            covered_set = set(covered_points)
+            missed_points = [p for p in canonical_points if p not in covered_set]
+        else:
+            # Trim any non-canonical drift from covered/missed lists.
+            covered_points = [p for p in covered_points if p in canonical_set]
+            missed_points = [p for p in missed_points if p in canonical_set]
+
+    raw_coverage_pct = None  # type: Optional[int]
     try:
-        score = int(data.get("score", 3))
+        if data.get("coverage_pct") is not None:
+            raw_coverage_pct = int(data.get("coverage_pct"))
     except Exception:
-        score = 3
-    if score < 0:
-        score = 0
-    if score > 5:
-        score = 5
+        raw_coverage_pct = None
+
+    coverage_pct = None  # type: Optional[int]
 
     if alignment == "misaligned":
-        correct = []
+        canonical_points = []
+        covered_points = []
+        missed_points = []
         incorrect = []
-        missed = []
+        coverage_pct = 0
         score = 0
+        if not question_gap_points:
+            question_gap_points = _uniq_clean_list(
+                data.get("canonical_points", data.get("missed", [])),
+                limit=3,
+            )
         if not overall:
             overall = "Question drifted from canonical target."
+    else:
+        denom = len(canonical_points)
+        if denom <= 0:
+            denom = len(covered_points) + len(missed_points)
+        if denom > 0:
+            covered_n = min(len(covered_points), denom)
+            coverage_pct = int(round((100.0 * covered_n) / float(denom)))
+        elif raw_coverage_pct is not None:
+            coverage_pct = raw_coverage_pct
+        if coverage_pct is not None:
+            coverage_pct = max(0, min(100, int(coverage_pct)))
+        if not question_gap_points:
+            question_gap_points = list(missed_points)
+
+    if alignment != "misaligned":
+        try:
+            score = int(data.get("score", 0))
+        except Exception:
+            score = 0
 
     return {
         "alignment": alignment,
         "alignment_note": alignment_note,
+        "canonical_points": canonical_points,
+        "covered_points": covered_points,
+        "missed_points": missed_points,
+        "coverage_pct": coverage_pct,
+        "question_gap_points": question_gap_points,
         "learning_feedback": learning_feedback,
-        "correct": correct,
+        # Back-compat aliases for older UI paths/tests.
+        "correct": covered_points,
         "incorrect": incorrect,
-        "missed": missed,
+        "missed": missed_points,
         "overall": overall,
         "score": score,
     }
@@ -294,6 +376,11 @@ def _parse_partial_grading_payload(raw: str) -> Optional[dict]:
     data = {
         "alignment": _extract_json_string_field(raw, "alignment") or "aligned",
         "alignment_note": _extract_json_string_field(raw, "alignment_note"),
+        "canonical_points": _extract_json_string_list_field(raw, "canonical_points", limit=3),
+        "covered_points": _extract_json_string_list_field(raw, "covered_points", limit=3),
+        "missed_points": _extract_json_string_list_field(raw, "missed_points", limit=3),
+        "coverage_pct": _extract_json_int_field(raw, "coverage_pct", default=None),
+        "question_gap_points": _extract_json_string_list_field(raw, "question_gap_points", limit=3),
         "learning_feedback": _extract_json_string_list_field(raw, "learning_feedback", limit=2),
         "correct": _extract_json_string_list_field(raw, "correct", limit=2),
         "incorrect": _extract_json_string_list_field(raw, "incorrect", limit=2),
@@ -304,6 +391,10 @@ def _parse_partial_grading_payload(raw: str) -> Optional[dict]:
 
     has_signal = any([
         data["alignment_note"],
+        data["canonical_points"],
+        data["covered_points"],
+        data["missed_points"],
+        data["question_gap_points"],
         data["learning_feedback"],
         data["correct"],
         data["incorrect"],
@@ -325,8 +416,9 @@ def grade_response(
     """
     Grade a freeform response against the canonical answer.
 
-    Returns a dict with keys: alignment, alignment_note, learning_feedback,
-    correct, incorrect, missed, overall, score.
+    Returns a dict with keys: alignment, alignment_note, canonical_points,
+    covered_points, missed_points, coverage_pct, question_gap_points,
+    learning_feedback, incorrect, overall (plus back-compat aliases).
     Falls back to a neutral structured payload if JSON parsing fails.
     Returns None on API failure.
     """
@@ -380,6 +472,11 @@ def grade_response(
         return {
             "alignment": "aligned",
             "alignment_note": "",
+            "canonical_points": [],
+            "covered_points": [],
+            "missed_points": [],
+            "coverage_pct": None,
+            "question_gap_points": [],
             "learning_feedback": [],
             "correct": [],
             "incorrect": [],

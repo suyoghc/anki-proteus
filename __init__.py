@@ -45,6 +45,7 @@ def _log(msg: str):
 def load_config():
     """Load config, merging user overrides with defaults."""
     defaults = {
+        "enabled": True,                  # master on/off toggle for Proteus variants
         "api_key": "",
         "model": "claude-sonnet-4-20250514",
         "response_mode": "flip",          # "flip" or "freeform"
@@ -119,6 +120,12 @@ def init_addon():
     toggle_action.triggered.connect(toggle_response_mode)
     mw.form.menuTools.addAction(toggle_action)
 
+    # Add master on/off toggle shortcut (Cmd/Ctrl+Shift+P)
+    enabled_action = QAction("Toggle Proteus On/Off", mw)
+    enabled_action.setShortcut("Ctrl+Shift+P")
+    enabled_action.triggered.connect(toggle_proteus_enabled)
+    mw.form.menuTools.addAction(enabled_action)
+
     # Add usage stats menu item
     usage_action = QAction("Proteus Usage Stats", mw)
     usage_action.triggered.connect(show_usage_dialog)
@@ -162,6 +169,21 @@ def toggle_response_mode():
             """)
 
 
+def toggle_proteus_enabled():
+    # type: () -> None
+    """Master toggle for enabling/disabling Proteus variants."""
+    global CONFIG
+    now_enabled = not bool(CONFIG.get("enabled", True))
+    CONFIG["enabled"] = now_enabled
+    if now_enabled:
+        tooltip("Proteus: enabled")
+        if mw.state == "review":
+            _start_batch_prefetch()
+    else:
+        tooltip("Proteus: disabled")
+        _cancel_batch_prefetch()
+
+
 # ---------------------------------------------------------------------------
 # Card eligibility
 # ---------------------------------------------------------------------------
@@ -190,6 +212,9 @@ def _has_enough_text(card) -> bool:
 
 def should_transform(card) -> bool:
     """Decide whether this card should get a variant."""
+    if not CONFIG.get("enabled", True):
+        return False
+
     if not CONFIG.get("api_key"):
         return False
 
@@ -228,6 +253,9 @@ def should_prefetch(card) -> bool:
     prefetch eligible cards.  The random roll at review time decides
     whether to actually show the variant or the original.
     """
+    if not CONFIG.get("enabled", True):
+        return False
+
     if not CONFIG.get("api_key"):
         return False
 
@@ -288,9 +316,16 @@ def on_card_will_show(text: str, card, kind: str) -> str:
         elif kind.endswith("Answer"):
             if _current_variant and _current_variant_id is not None:
                 extra = ""
+                post_answer = ""
                 if CONFIG.get("response_mode") == "freeform" and _user_response.strip():
                     extra = _evaluation_html()
-                return extra + _feedback_buttons_html(card.id, _current_variant_id) + text
+                    post_answer = _question_gap_html()
+                return (
+                    extra
+                    + _feedback_buttons_html(card.id, _current_variant_id)
+                    + text
+                    + post_answer
+                )
 
             return text
     except Exception as e:
@@ -375,6 +410,28 @@ def _set_evaluation_message(message):
     mw.reviewer.web.eval(js)
 
 
+def _set_gap_message(message):
+    # type: (str) -> None
+    """Render a plain message in the question-gap box."""
+    if not (mw.reviewer and mw.reviewer.web):
+        return
+    rendered = (
+        "<span style='color: #666; font-style: italic;'>"
+        + html.escape(message)
+        + "</span>"
+    )
+    js_str = json.dumps(rendered)
+    js = f"""
+    (function() {{
+        var el = document.getElementById('variant-question-gaps');
+        if (el) {{
+            el.innerHTML = {js_str};
+        }}
+    }})();
+    """
+    mw.reviewer.web.eval(js)
+
+
 def _card_ids_match(card_id):
     # type: (object) -> bool
     """Robustly compare signal card id with current card id."""
@@ -394,6 +451,60 @@ def _render_saved_evaluation():
         return _render_evaluation_html(data)
     except (json.JSONDecodeError, ValueError, TypeError):
         return html.escape(str(_evaluation_text)).replace("\n", "<br>")
+
+
+def _render_question_gap_content(data):
+    # type: (dict) -> str
+    """Return inner HTML for the post-answer question-gap view."""
+    alignment = str(data.get("alignment", "aligned")).strip().lower()
+    if alignment not in ("aligned", "partial", "misaligned"):
+        alignment = "aligned"
+    coverage_pct, canonical_points, _covered_points, missed_points = _eval_coverage_pct(
+        data, alignment
+    )
+
+    gaps = _eval_list(data, "question_gap_points")
+    if not gaps:
+        gaps = list(missed_points)
+    if not gaps and alignment == "misaligned":
+        gaps = list(canonical_points)
+    if not gaps:
+        if coverage_pct is not None and coverage_pct < 100:
+            return (
+                "<span style='color: #777; font-style: italic;'>"
+                "Target-gap details unavailable."
+                "</span>"
+            )
+        return (
+            "<span style='color: #777; font-style: italic;'>"
+            "No obvious target gaps."
+            "</span>"
+        )
+
+    bullets = "".join(
+        f"<li style='margin-bottom: 4px;'>{html.escape(item)}</li>"
+        for item in gaps
+    )
+    return (
+        "<div style='color: #666; font-size: 0.85em; margin-bottom: 6px;'>"
+        "<b>Not targeted by this variant:</b>"
+        "</div>"
+        "<ul style='margin: 0; padding: 0 0 0 18px; font-size: 0.9em;'>"
+        + bullets
+        + "</ul>"
+    )
+
+
+def _render_saved_question_gaps():
+    # type: () -> Optional[str]
+    """Return rendered HTML for any saved question-gap content, or None."""
+    if not _evaluation_text:
+        return None
+    try:
+        data = json.loads(_evaluation_text)
+        return _render_question_gap_content(data)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
 
 
 def _cancel_grading_watchdog():
@@ -428,24 +539,120 @@ def _start_grading_watchdog(card_id):
     QTimer.singleShot(delay_ms, _watchdog_fire)
 
 
+def _eval_list(data, key, legacy_key=None):
+    # type: (dict, str, Optional[str]) -> list
+    """Return a deduplicated non-empty string list from evaluation payload keys."""
+    items = data.get(key)
+    if not isinstance(items, list):
+        items = []
+    if not items and legacy_key:
+        legacy = data.get(legacy_key)
+        if isinstance(legacy, list):
+            items = legacy
+
+    out = []
+    seen = set()
+    for item in items:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
+def _eval_coverage_pct(data, alignment):
+    # type: (dict, str) -> tuple
+    """Return (coverage_pct, canonical_points, covered_points, missed_points)."""
+    canonical_points = _eval_list(data, "canonical_points")
+    covered_points = _eval_list(data, "covered_points", legacy_key="correct")
+    missed_points = _eval_list(data, "missed_points", legacy_key="missed")
+
+    if not canonical_points:
+        canonical_points = []
+        seen = set()
+        for item in (covered_points + missed_points):
+            if item in seen:
+                continue
+            seen.add(item)
+            canonical_points.append(item)
+    else:
+        canonical_set = set(canonical_points)
+        if not covered_points and missed_points:
+            missed_set = set(missed_points)
+            covered_points = [p for p in canonical_points if p not in missed_set]
+        if not missed_points and covered_points:
+            covered_set = set(covered_points)
+            missed_points = [p for p in canonical_points if p not in covered_set]
+        else:
+            covered_points = [p for p in covered_points if p in canonical_set]
+            missed_points = [p for p in missed_points if p in canonical_set]
+
+    if alignment == "misaligned":
+        return (None, canonical_points, covered_points, missed_points)
+
+    raw_pct = None
+    try:
+        raw = data.get("coverage_pct")
+        if raw is not None:
+            raw_pct = int(raw)
+    except Exception:
+        raw_pct = None
+
+    coverage_pct = None
+    denom = len(canonical_points)
+    if denom <= 0:
+        denom = len(covered_points) + len(missed_points)
+    if denom > 0:
+        covered_n = min(len(covered_points), denom)
+        coverage_pct = int(round((100.0 * covered_n) / float(denom)))
+    elif raw_pct is not None:
+        coverage_pct = raw_pct
+
+    if coverage_pct is not None:
+        coverage_pct = max(0, min(100, int(coverage_pct)))
+
+    return (coverage_pct, canonical_points, covered_points, missed_points)
+
+
+def _coverage_meter_html(coverage_pct):
+    # type: (Optional[int]) -> str
+    """Build a compact donut meter HTML for answer coverage."""
+    if coverage_pct is None:
+        return ""
+
+    dark_gray = "#5f6368"
+    light_gray = "#d9dce1"
+
+    return (
+        '<div style="min-width: 78px; text-align: center; margin-left: auto;">'
+        '<div style="width: 64px; height: 64px; border-radius: 50%; '
+        f'background: conic-gradient({dark_gray} {coverage_pct}%, '
+        f'{light_gray} {coverage_pct}%); '
+        'position: relative; margin-left: auto;">'
+        '<div style="position: absolute; inset: 9px; border-radius: 50%; background: #fff; '
+        'display: flex; align-items: center; justify-content: center; '
+        'font-size: 0.78em; color: #444; font-weight: 600;">'
+        f'{coverage_pct}%'
+        '</div></div>'
+        '<div style="margin-top: 4px; font-size: 0.75em; color: #666;">Target coverage</div>'
+        '</div>'
+    )
+
+
 def _render_evaluation_html(data):
     # type: (dict) -> str
-    """Build color-coded HTML from structured grading data in a columnar layout."""
-    correct = list(data.get("correct", []))
-    incorrect = list(data.get("incorrect", []))
-    missed = list(data.get("missed", []))
+    """Build color-coded HTML from structured grading data with coverage meter."""
+    incorrect = _eval_list(data, "incorrect")
     overall = str(data.get("overall", ""))
     alignment_note = str(data.get("alignment_note", ""))
     alignment = str(data.get("alignment", "aligned")).strip().lower()
     if alignment not in ("aligned", "partial", "misaligned"):
         alignment = "aligned"
-    learning_feedback = data.get("learning_feedback", [])
-    if not isinstance(learning_feedback, list):
-        learning_feedback = []
-    try:
-        score = int(data.get("score", 0))
-    except Exception:
-        score = 0
+    learning_feedback = _eval_list(data, "learning_feedback")
+    coverage_pct, _canonical_points, covered_points, missed_points = _eval_coverage_pct(
+        data, alignment
+    )
 
     if alignment == "misaligned":
         parts = [
@@ -456,7 +663,7 @@ def _render_evaluation_html(data):
 
         related = []
         seen = set()
-        for item in (learning_feedback + correct + incorrect + missed):
+        for item in (learning_feedback + covered_points + incorrect + missed_points):
             text = str(item).strip()
             if not text or text in seen:
                 continue
@@ -495,9 +702,9 @@ def _render_evaluation_html(data):
         return "".join(parts)
 
     columns = [
-        (correct,   "Correct",   "#66bb6a", "#e8f5e9"),
+        (covered_points, "Covered",   "#66bb6a", "#e8f5e9"),
+        (missed_points,  "Missed",    "#ffa726", "#fff8e1"),
         (incorrect, "Incorrect", "#ef5350", "#fce4ec"),
-        (missed,    "Missed",    "#ffa726", "#fff8e1"),
     ]
     if learning_feedback:
         columns.append((learning_feedback, "Related", "#1e88e5", "#e3f2fd"))
@@ -509,28 +716,28 @@ def _render_evaluation_html(data):
 
     parts = []
 
+    header_lines = []
     if alignment == "partial":
         msg = "Partial alignment."
         if alignment_note:
             msg += " " + alignment_note
-        parts.append(
-            '<div style="margin-bottom: 8px; font-style: italic; color: #555;">'
-            + html.escape(msg) +
-            '</div>'
-        )
+        header_lines.append(msg)
+    if overall:
+        header_lines.append(overall)
 
-    # Overall summary + score on top
-    if overall or score >= 1:
-        summary = ""
-        if overall:
-            summary += html.escape(overall)
-        if score >= 1:
-            if summary:
-                summary += f' &mdash; '
-            summary += f'<b>{score}/5</b>'
+    if header_lines or coverage_pct is not None:
+        header_html = "".join(
+            '<div style="margin-bottom: 4px; font-style: italic; color: #555;">'
+            + html.escape(line)
+            + '</div>'
+            for line in header_lines
+        )
         parts.append(
-            f'<div style="margin-bottom: 8px; font-style: italic; color: #555;">'
-            f'{summary}</div>'
+            '<div style="display: flex; align-items: flex-start; gap: 12px; '
+            'justify-content: space-between; margin-bottom: 8px;">'
+            '<div style="flex: 1;">' + header_html + '</div>'
+            + _coverage_meter_html(coverage_pct) +
+            '</div>'
         )
 
     # Separator + columnar table
@@ -588,17 +795,28 @@ def _on_grading_done(card_id, evaluation_json):
     try:
         data = json.loads(evaluation_json)
         rendered = _render_evaluation_html(data)
+        gap_rendered = _render_question_gap_content(data)
     except (json.JSONDecodeError, ValueError):
         rendered = html.escape(evaluation_json).replace("\n", "<br>")
+        gap_rendered = (
+            "<span style='color: #666; font-style: italic;'>"
+            "Target-gap analysis unavailable."
+            "</span>"
+        )
 
     if mw.reviewer and mw.reviewer.web:
         # json.dumps produces a valid JS string literal (with quotes)
         js_str = json.dumps(rendered)
+        gap_js_str = json.dumps(gap_rendered)
         js = f"""
         (function() {{
             var el = document.getElementById('variant-evaluation');
             if (el) {{
                 el.innerHTML = {js_str};
+            }}
+            var gap = document.getElementById('variant-question-gaps');
+            if (gap) {{
+                gap.innerHTML = {gap_js_str};
             }}
         }})();
         """
@@ -617,6 +835,7 @@ def _on_grading_failed(card_id, error_message):
     _log(f"grading failed for card {card_id}: {error_message}")
     _evaluation_text = "Evaluation unavailable (timeout). You can still grade manually."
     _set_evaluation_message(_evaluation_text)
+    _set_gap_message("Target-gap analysis unavailable.")
 
 
 def _start_early_grading():
@@ -665,6 +884,7 @@ def on_answer_shown(card):
         _evaluation_text = "No response captured. Type or dictate in the box, then press Enter."
         _cancel_grading_watchdog()
         _set_evaluation_message(_evaluation_text)
+        _set_gap_message("Target-gap analysis requires a response.")
         return
 
     # Skip if early grading already started for this card
@@ -1020,6 +1240,27 @@ def _evaluation_html() -> str:
         padding: 12px 14px;
         background: #f8f9fa;
         border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        font-size: 0.9em;
+        line-height: 1.5;
+    ">
+        {rendered}
+    </div>
+    """.format(rendered=rendered)
+
+
+def _question_gap_html() -> str:
+    """Post-answer box listing canonical targets not covered by the variant."""
+    rendered = _render_saved_question_gaps()
+    if not rendered:
+        rendered = '<span style="color: #888;">&#9203; Analyzing target gaps...</span>'
+    return """
+    <div id="variant-question-gaps" style="
+        margin-top: 12px;
+        margin-bottom: 8px;
+        padding: 10px 12px;
+        background: #fafafa;
+        border: 1px solid #e6e6e6;
         border-radius: 6px;
         font-size: 0.9em;
         line-height: 1.5;
@@ -1406,13 +1647,18 @@ def show_card_ideas_dialog():
                 if eval_json:
                     try:
                         eval_data = json.loads(eval_json)
-                        overall = eval_data.get('overall', '')
-                        score = eval_data.get('score', 0)
+                        overall = str(eval_data.get('overall', '')).strip()
+                        alignment = str(eval_data.get("alignment", "aligned")).strip().lower()
+                        if alignment not in ("aligned", "partial", "misaligned"):
+                            alignment = "aligned"
+                        coverage_pct, _c, _v, _m = _eval_coverage_pct(eval_data, alignment)
                         eval_parts = []
                         if overall:
                             eval_parts.append(html.escape(overall))
-                        if score >= 1:
-                            eval_parts.append(f"{score}/5")
+                        if alignment == "misaligned":
+                            eval_parts.append("drifted")
+                        elif coverage_pct is not None:
+                            eval_parts.append(f"{coverage_pct}% coverage")
                         if eval_parts:
                             eval_lbl = QLabel(
                                 f"<span style='color: #555; font-style: italic;'>"

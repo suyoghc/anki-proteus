@@ -19,7 +19,7 @@ Anki's scheduler is completely untouched — FSRS/SM-2 works as usual. The varia
 Standard Anki flow with transformed questions. Fast, zero friction.
 
 ### Freeform mode
-After seeing the variant question, you get a text input area. Speak your answer using a dictation tool like [Wispr Flow](https://www.wispr.flow/) (or type it), then flip. The LLM evaluates your response against the canonical answer and shows structured, color-coded feedback (correct, incorrect, missed) alongside the original answer.
+After seeing the variant question, you get a text input area. Speak your answer using a dictation tool like [Wispr Flow](https://www.wispr.flow/) (or type it), then flip. The LLM evaluates your response against the canonical answer and shows a coverage-first summary (target coverage donut + covered/missed points), with a post-answer panel for target gaps not covered by the variant.
 
 Toggle between modes anytime with **Ctrl+Shift+V** or in the config.
 
@@ -27,10 +27,11 @@ Toggle between modes anytime with **Ctrl+Shift+V** or in the config.
 
 - **Batch prefetching**: At review start, pre-generates variants for upcoming cards in parallel background threads
 - **Variant caching**: SQLite-backed cache stores multiple variants per card, reducing live API calls
-- **Structured grading**: Freeform responses are graded into correct/incorrect/missed categories with pastel color-coded feedback
+- **Coverage-first grading**: Freeform responses show canonical-answer coverage (donut meter + covered/missed points), plus related feedback when useful
 - **Card ideas**: Save interesting variant questions as card ideas during review (bookmark button), then review and create new cards from them via **Tools → Proteus: Card Ideas**
 - **Human-in-the-loop editing**: In the Card Ideas dialog, edit draft wording, apply reason tags, and regenerate with targeted instructions (`Shorter`, `More Concrete`, `Less Jargon`, `Add Contrast Case`) before accepting/rejecting
 - **Feedback-gated creation**: `Create Card` is enabled only for ideas that include freeform grading feedback (from Wispr/typed response)
+- **Quick master toggle**: `Cmd/Ctrl+Shift+P` toggles Proteus variant generation on/off for the current session
 - **Usage budget**: Set a dollar cap to limit API spend per session
 - **Image card safety**: Automatically skips cards with insufficient text (e.g., Image Occlusion)
 - **Feedback buttons**: Rate variant quality with thumbs up/down to track what works
