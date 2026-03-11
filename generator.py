@@ -110,6 +110,70 @@ Original answer: {answer}
 Generate one variant question that tests the same concept."""
 
 
+_MAX_VARIANT_WORDS = 26
+_MAX_VARIANT_CHARS = 180
+
+_VARIANT_SHORTEN_SYSTEM_PROMPT = """You shorten flashcard questions while preserving the tested concept.
+
+Rules:
+- Keep the same answer target as the original.
+- Keep one clear ask only.
+- Keep wording plain and concrete.
+- Output must be <= 26 words and <= 180 characters.
+- Return ONLY the rewritten question text.
+"""
+
+_VARIANT_SHORTEN_TEMPLATE = """Original question: {question}
+
+Original answer: {answer}
+
+Current variant: {variant}
+
+Rewrite it to be concise while preserving the same answer target."""
+
+
+def _normalize_variant_text(text: str) -> str:
+    """Normalize whitespace in generated variant text."""
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def _variant_too_long(text: str) -> bool:
+    """True when variant exceeds configured word/char limits."""
+    if not text:
+        return False
+    return len(text.split()) > _MAX_VARIANT_WORDS or len(text) > _MAX_VARIANT_CHARS
+
+
+def _hard_limit_variant(text: str) -> str:
+    """Force a variant into length limits as a final fallback."""
+    variant = _normalize_variant_text(text)
+    if not variant:
+        return ""
+
+    q_idx = variant.find("?")
+    if q_idx != -1 and (q_idx + 1) <= _MAX_VARIANT_CHARS:
+        variant = variant[: q_idx + 1].strip()
+
+    words = variant.split()
+    if len(words) > _MAX_VARIANT_WORDS:
+        variant = " ".join(words[:_MAX_VARIANT_WORDS]).rstrip(" ,;:.")
+
+    if len(variant) > _MAX_VARIANT_CHARS:
+        clipped = variant[:_MAX_VARIANT_CHARS]
+        if " " in clipped:
+            clipped = clipped.rsplit(" ", 1)[0]
+        variant = clipped.rstrip(" ,;:.")
+
+    if variant and not variant.endswith("?"):
+        if len(variant) >= _MAX_VARIANT_CHARS:
+            variant = variant[: _MAX_VARIANT_CHARS - 1].rstrip(" ,;:.")
+        variant = variant + "?"
+
+    return variant
+
+
 def generate_variant(question: str, answer: str, config: dict) -> Optional[str]:
     """
     Generate a variant question via LLM.
@@ -134,7 +198,35 @@ def generate_variant(question: str, answer: str, config: dict) -> Optional[str]:
 
     system = VARIANT_SYSTEM_PROMPT.strip()
 
-    return _call_api(api_key, model, system, user_msg, max_tokens=300)
+    raw = _call_api(api_key, model, system, user_msg, max_tokens=300)
+    if not raw:
+        return None
+
+    variant = _normalize_variant_text(raw)
+    if not variant:
+        return None
+
+    # One shorten pass for overlong generations before hard-capping.
+    if _variant_too_long(variant):
+        shorten_user_msg = _VARIANT_SHORTEN_TEMPLATE.format(
+            question=question,
+            answer=answer,
+            variant=variant,
+        )
+        shortened = _call_api(
+            api_key,
+            model,
+            _VARIANT_SHORTEN_SYSTEM_PROMPT.strip(),
+            shorten_user_msg,
+            max_tokens=120,
+        )
+        if shortened:
+            variant = _normalize_variant_text(shortened)
+
+    if _variant_too_long(variant):
+        variant = _hard_limit_variant(variant)
+
+    return variant or None
 
 
 # ---------------------------------------------------------------------------

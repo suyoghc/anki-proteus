@@ -463,11 +463,22 @@ def _render_question_gap_content(data):
         data, alignment
     )
 
-    gaps = _eval_list(data, "question_gap_points")
-    if not gaps:
-        gaps = list(missed_points)
+    variant_gaps = _eval_list(data, "question_gap_points")
+    response_gaps = list(missed_points)
+
+    # "This Proteus pass" means both question-target and response coverage gaps.
+    gaps = []
+    seen = set()
+    for item in (response_gaps + variant_gaps):
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        gaps.append(text)
+
     if not gaps and alignment == "misaligned":
         gaps = list(canonical_points)
+
     if not gaps:
         if coverage_pct is not None and coverage_pct < 100:
             return (
@@ -477,7 +488,7 @@ def _render_question_gap_content(data):
             )
         return (
             "<span style='color: #777; font-style: italic;'>"
-            "No obvious target gaps."
+            "Nothing obvious left uncovered in this Proteus pass."
             "</span>"
         )
 
@@ -487,7 +498,7 @@ def _render_question_gap_content(data):
     )
     return (
         "<div style='color: #666; font-size: 0.85em; margin-bottom: 6px;'>"
-        "<b>Not targeted by this variant:</b>"
+        "<b>Not covered in this Proteus pass:</b>"
         "</div>"
         "<ul style='margin: 0; padding: 0 0 0 18px; font-size: 0.9em;'>"
         + bullets

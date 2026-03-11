@@ -119,6 +119,71 @@ class TestUsageTracker:
 # 7-8  Grading config path (generator.py)
 # ===========================================================================
 
+class TestVariantGeneration:
+
+    def test_generate_variant_shortens_overlong_output(self, monkeypatch):
+        """Overlong variants trigger one shorten pass."""
+        calls = []
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            calls.append({"max_tokens": max_tokens, "system": system})
+            if len(calls) == 1:
+                return (
+                    "What type of effects should be used for subject and item in a "
+                    "hierarchical study design where you need to account for "
+                    "correlations within groups and allow parameters to vary across "
+                    "different levels of the data?"
+                )
+            return "Should subject and item be modeled as random effects in this study?"
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.generate_variant(
+            question="Q",
+            answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert len(calls) == 2
+        assert calls[0]["max_tokens"] == 300
+        assert calls[1]["max_tokens"] == 120
+        assert out == "Should subject and item be modeled as random effects in this study?"
+        assert len(out.split()) <= generator._MAX_VARIANT_WORDS
+
+    def test_generate_variant_hard_caps_when_shorten_fails(self, monkeypatch):
+        """If shorten pass fails, variant is hard-capped to limits."""
+        calls = []
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            calls.append(max_tokens)
+            if len(calls) == 1:
+                return (
+                    "In this hierarchical design with repeated observations from many "
+                    "subjects and items across several contextual groupings, what type "
+                    "of effects should be used for subject and item if we need to "
+                    "capture within-group correlations while allowing parameters to vary?"
+                )
+            return None
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.generate_variant(
+            question="Q",
+            answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert calls == [300, 120]
+        assert out is not None
+        assert len(out.split()) <= generator._MAX_VARIANT_WORDS
+        assert len(out) <= generator._MAX_VARIANT_CHARS
+        assert out.endswith("?")
+
+
+# ===========================================================================
+# 7-8  Grading config path (generator.py)
+# ===========================================================================
+
 class TestGradingConfig:
 
     def test_grade_response_uses_fast_defaults(self, monkeypatch):
