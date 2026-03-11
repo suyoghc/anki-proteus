@@ -426,6 +426,11 @@ def _on_grading_done(card_id, evaluation_json):
 
     still_on_card = (card_id == _current_card_id)
 
+    if not still_on_card:
+        _log(f"grading: discarding stale evaluation for card {card_id} "
+             f"(current is {_current_card_id})")
+        return
+
     if mw.reviewer and mw.reviewer.web:
         # json.dumps produces a valid JS string literal (with quotes)
         js_str = json.dumps(rendered)
@@ -437,8 +442,7 @@ def _on_grading_done(card_id, evaluation_json):
             }}
         }})();
         """
-        _log(f"grading: injecting evaluation ({len(rendered)} chars, "
-             f"{'current' if still_on_card else 'stale'})")
+        _log(f"grading: injecting evaluation ({len(rendered)} chars)")
         mw.reviewer.web.eval(js)
 
 
@@ -791,11 +795,12 @@ def _freeform_input_html() -> str:
         '></textarea></div>'
         '<script>'
         '(function() {'
+        ' if (window._proteusPollingId) { clearInterval(window._proteusPollingId); }'
         ' var ta = document.getElementById("variant-response-input");'
         ' if (ta) {'
         '  setTimeout(function() { ta.focus(); }, 100);'
         '  var _lastVal = "";'
-        '  setInterval(function() {'
+        '  window._proteusPollingId = setInterval(function() {'
         '   if (ta.value !== _lastVal) { _lastVal = ta.value;'
         '    pycmd("variantResponse:" + ta.value); }'
         '  }, 500);'

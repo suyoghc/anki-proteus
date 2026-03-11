@@ -19,9 +19,19 @@ Anki's scheduler is completely untouched — FSRS/SM-2 works as usual. The varia
 Standard Anki flow with transformed questions. Fast, zero friction.
 
 ### Freeform mode
-After seeing the variant question, you get a text input area. Speak your answer using a dictation tool like [Wispr Flow](https://www.wispr.flow/) (or type it), then flip. The LLM evaluates your response against the canonical answer and shows brief feedback alongside the original answer.
+After seeing the variant question, you get a text input area. Speak your answer using a dictation tool like [Wispr Flow](https://www.wispr.flow/) (or type it), then flip. The LLM evaluates your response against the canonical answer and shows structured, color-coded feedback (correct, incorrect, missed) alongside the original answer.
 
 Toggle between modes anytime with **Ctrl+Shift+V** or in the config.
+
+## Features
+
+- **Batch prefetching**: At review start, pre-generates variants for upcoming cards in parallel background threads
+- **Variant caching**: SQLite-backed cache stores multiple variants per card, reducing live API calls
+- **Structured grading**: Freeform responses are graded into correct/incorrect/missed categories with pastel color-coded feedback
+- **Card ideas**: Save interesting variant questions as card ideas during review (bookmark button), then review and create new cards from them via **Tools → Proteus: Card Ideas**
+- **Usage budget**: Set a dollar cap to limit API spend per session
+- **Image card safety**: Automatically skips cards with insufficient text (e.g., Image Occlusion)
+- **Feedback buttons**: Rate variant quality with thumbs up/down to track what works
 
 ## Compatibility
 
@@ -54,7 +64,14 @@ Edit via **Tools → Add-ons → Config** or directly in `config.json`:
     "transform_percent": 80,
     "min_interval_days": 0,
     "max_cached_variants": 3,
-    "system_prompt": ""
+    "system_prompt": "",
+    "exclude_note_types": ["Image Occlusion"],
+    "batch_prefetch_count": 15,
+    "batch_prefetch_concurrency": 3,
+    "show_prefetch_progress": true,
+    "debug_logging": false,
+    "usage_budget": 5.00,
+    "submit_delay_ms": 750
 }
 ```
 
@@ -73,10 +90,19 @@ Edit via **Tools → Add-ons → Config** or directly in `config.json`:
 clinical vignettes and patient presentations."
 ```
 
-```
-"The learner is studying introductory chemistry. Use
-everyday examples and avoid jargon beyond the course level."
-```
+**`exclude_note_types`**: Skip variant generation for specific note types. Image Occlusion is excluded by default since image-based cards lack sufficient text.
+
+**`batch_prefetch_count`**: Number of upcoming cards to pre-generate variants for at review session start. Higher values reduce mid-review API latency.
+
+**`batch_prefetch_concurrency`**: Number of parallel worker threads for batch prefetching.
+
+**`show_prefetch_progress`**: Show a progress indicator during batch prefetching.
+
+**`debug_logging`**: Write detailed diagnostic logs to `proteus_diag.log` in the addon folder.
+
+**`usage_budget`**: Maximum API spend (in USD) per session. The addon tracks estimated token costs and stops generating variants when the budget is reached.
+
+**`submit_delay_ms`**: Delay in milliseconds between pressing Enter in freeform mode and flipping the card. Gives the grading API call a head start so feedback arrives sooner. Default: 750.
 
 ## Cost
 
@@ -90,17 +116,20 @@ Pre-fetching and caching minimize live API calls during review.
 ## Keyboard Shortcuts
 
 - **Ctrl+Shift+V**: Toggle between flip and freeform mode mid-session
+- **Enter** (in freeform textarea): Submit response and flip to answer
 
 ## Files
 
 ```
 anki_proteus/
-├── __init__.py       # Hooks, UI injection, review flow
-├── generator.py      # LLM API calls (variant generation + grading)
-├── cache.py          # SQLite cache for pre-generated variants
-├── prefetch.py       # Background pre-fetching thread
-├── config.json       # Default configuration
-├── manifest.json     # Anki addon metadata
+├── __init__.py         # Hooks, UI injection, review flow
+├── generator.py        # LLM API calls (variant generation + grading)
+├── cache.py            # SQLite cache for variants + card ideas
+├── prefetch.py         # Single-card background pre-fetching thread
+├── batch_prefetch.py   # Parallel batch pre-generation at session start
+├── config.json         # Default configuration
+├── manifest.json       # Anki addon metadata
+├── tests/test_core.py  # Unit tests
 └── README.md
 ```
 
@@ -115,6 +144,12 @@ ln -s /path/to/anki-proteus ~/Library/Application\ Support/Anki2/addons21/anki_p
 ```
 
 Changes take effect on Anki restart. The addon initializes via `profile_did_open` hook with a QTimer fallback for single-profile setups.
+
+Run tests:
+
+```bash
+pytest -v
+```
 
 ## Future Directions
 
