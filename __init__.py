@@ -67,6 +67,10 @@ def init_addon():
     CONFIG = load_config()
     _cache = VariantCache(ADDON_DIR, max_variants=CONFIG.get("max_cached_variants", 3))
 
+    if not CONFIG.get("api_key"):
+        showInfo("Proteus: No API key configured.\n\n"
+                 "Set it in: Tools → Add-ons → select Proteus → Config")
+
     # Register hooks
     gui_hooks.card_will_show.append(on_card_will_show)
     gui_hooks.reviewer_did_show_question.append(on_question_shown)
@@ -134,7 +138,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
     """Intercept card display. Replace question with variant if eligible."""
     global _current_variant, _current_card_id, _evaluation_text, _user_response
 
-    if kind == "question":
+    if kind.endswith("Question"):
         _evaluation_text = None
         _current_variant = None
         _user_response = ""
@@ -168,7 +172,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
 
         return text
 
-    elif kind == "answer":
+    elif kind.endswith("Answer"):
         if _current_variant and CONFIG.get("response_mode") == "freeform":
             eval_html = _evaluation_html()
             return eval_html + text
@@ -369,9 +373,14 @@ def _extract_text(card, side: str) -> str:
 
 def show_config_dialog():
     """Open the addon config in Anki's built-in config editor."""
-    mw.addonManager.onConfigUpdated = _on_config_updated
     addon_module = __name__.split(".")[0]
-    mw.addonManager.onEdit(addon_module)
+    try:
+        from aqt.addons import ConfigEditor
+        dialog = ConfigEditor(mw, addon_module)
+        if dialog.exec():
+            _on_config_updated(None)
+    except Exception:
+        showInfo("Open config via: Tools → Add-ons → select Proteus → Config")
 
 
 def _on_config_updated(conf):
@@ -386,5 +395,20 @@ def _on_config_updated(conf):
 # Bootstrap
 # ---------------------------------------------------------------------------
 
-# Initialize when Anki profile is loaded
-gui_hooks.profile_did_open.append(lambda: init_addon())
+_initialized = False
+
+def _try_init():
+    global _initialized
+    if _initialized:
+        return
+    _initialized = True
+    try:
+        init_addon()
+    except Exception as e:
+        showInfo(f"Proteus: init failed: {e}")
+
+gui_hooks.profile_did_open.append(_try_init)
+
+# Also try after a short delay in case profile_did_open already fired
+from aqt.qt import QTimer
+QTimer.singleShot(3000, lambda: _try_init() if mw.col else None)

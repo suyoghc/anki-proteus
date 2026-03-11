@@ -23,19 +23,23 @@ After seeing the variant question, you get a text input area. Speak your answer 
 
 Toggle between modes anytime with **Ctrl+Shift+V** or in the config.
 
+## Compatibility
+
+Tested on Anki 25.02+ (Python 3.9, Qt 6). Uses `gui_hooks.card_will_show` with context strings (`reviewQuestion`, `reviewAnswer`).
+
 ## Installation
 
 1. Find your Anki addons folder:
    - **Tools → Add-ons → Open Add-ons Folder** in Anki
    - Or navigate to `~/.local/share/Anki2/addons21/` (Linux), `~/Library/Application Support/Anki2/addons21/` (Mac), `%APPDATA%\Anki2\addons21\` (Windows)
 
-2. Copy the `anki_proteus` folder into the addons folder
+2. Copy the `anki_proteus` folder into the addons folder (or symlink it for development)
 
 3. Restart Anki
 
 4. Configure your API key:
    - **Tools → Add-ons** → select "Proteus" → **Config**
-   - Set `"api_key"` to your Anthropic API key
+   - Set `"api_key"` to your Anthropic API key (must be in double quotes)
 
 ## Configuration
 
@@ -103,6 +107,14 @@ anki_proteus/
 ## Development
 
 Initial prototype generated with Claude, iterated with Claude Code.
+
+For development, symlink the repo into your addons folder:
+
+```bash
+ln -s /path/to/anki-proteus ~/Library/Application\ Support/Anki2/addons21/anki_proteus
+```
+
+Changes take effect on Anki restart. The addon initializes via `profile_did_open` hook with a QTimer fallback for single-profile setups.
 
 ## Future Directions
 
