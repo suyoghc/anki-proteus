@@ -7,3 +7,4 @@ proteus_diag.log
 usage.json
 .pytest_cache/
 CLAUDE.md
+AGENTS.md
