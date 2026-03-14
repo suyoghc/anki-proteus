@@ -19,7 +19,7 @@ Anki's scheduler is completely untouched — FSRS/SM-2 works as usual. The varia
 Standard Anki flow with transformed questions. Fast, zero friction.
 
 ### Freeform mode
-After seeing the variant question, you get a text input area. Speak your answer using a dictation tool like [Wispr Flow](https://www.wispr.flow/) (or type it), then flip. The LLM evaluates your response against the canonical answer and shows a coverage-first summary (Target coverage donut + covered/missed points), with a post-answer panel for what was not covered in that full Proteus pass.
+After seeing the variant question, you get a text input area. Speak your answer using a dictation tool like [Wispr Flow](https://www.wispr.flow/) (or type it), then flip. The LLM evaluates your response against the canonical answer and shows an AI answer target above the original answer, plus a compact coverage-first table (`Target coverage` + addressed/remaining points and related feedback).
 
 Toggle between modes anytime with **Ctrl+Shift+V** (Cmd+Shift+V on macOS) or in the config.
 
@@ -27,11 +27,13 @@ Toggle between modes anytime with **Ctrl+Shift+V** (Cmd+Shift+V on macOS) or in 
 
 - **Batch prefetching**: At review start, pre-generates variants for upcoming cards in parallel background threads
 - **Variant caching**: SQLite-backed cache stores multiple variants per card, reducing live API calls
-- **Coverage-first grading**: Freeform responses show canonical-answer coverage (donut meter + covered/missed points), plus related feedback when useful
+- **Coverage-first grading**: Freeform responses show canonical-answer coverage in the same feedback table (`Target coverage` column), plus addressed/remaining target points and related feedback
+- **AI answer target**: A concise AI-generated expected answer is shown above the original answer in freeform reviews
 - **Card ideas**: Save interesting variant questions as card ideas during review (bookmark button), then review and create new cards from them via **Tools → Proteus: Card Ideas**
 - **Human-in-the-loop editing**: In the Card Ideas dialog, edit draft wording, apply reason tags, and regenerate with targeted instructions (`Shorter`, `More Concrete`, `Less Jargon`, `Add Contrast Case`) before accepting/rejecting
 - **Feedback-gated creation**: `Create Card` is enabled only for ideas that include freeform grading feedback (from Wispr/typed response)
 - **Quick master toggle**: `Ctrl+Shift+P` (Cmd+Shift+P on macOS) toggles Proteus variant generation on/off for the current session
+- **Variant peek after answer**: `Ctrl+Shift+B` (Cmd+Shift+B on macOS) toggles an inline panel that re-shows the variant prompt (and your captured response)
 - **Usage budget**: Set a dollar cap to limit API spend per session
 - **Image card safety**: Automatically skips cards with insufficient text (e.g., Image Occlusion)
 - **Feedback buttons**: Rate variant quality with thumbs up/down to track what works
@@ -42,6 +44,7 @@ Toggle between modes anytime with **Ctrl+Shift+V** (Cmd+Shift+V on macOS) or in 
 
 - **Proteus on/off**: `Ctrl+Shift+P` (Cmd+Shift+P on macOS) toggles variant generation for the current session.
 - **Review mode**: `Ctrl+Shift+V` (Cmd+Shift+V on macOS) toggles `flip` vs `freeform`.
+- **Answer-side variant peek**: `Ctrl+Shift+B` (Cmd+Shift+B on macOS) toggles the variant prompt panel after `Show Answer`.
 
 ### 2) Which cards can get a variant
 
@@ -67,25 +70,12 @@ In addition, review-time replacement uses cached variants only (the UI is never 
 - If the variant is **misaligned**, correctness verdicts are suppressed and the UI states:
   - `Question drifted from canonical target.`
 
-### 4) Post-answer gap panel semantics
-
-After the original answer, Proteus shows:
-
-- `Not covered in this Proteus pass:`
-
-This is the union of:
-
-- response coverage gaps (`missed_points`)
-- variant-target gaps (`question_gap_points`)
-
-This intentionally reflects the whole pass (variant + response), not only question wording.
-
-### 5) Coverage/gap consistency policy
+### 4) Coverage consistency policy
 
 - Coverage is derived from point sets when points are available.
-- If point-level details are missing, fallbacks avoid contradictory output (for example, non-100% coverage with “no gaps”).
+- Gaps are represented in `Remaining target points` (no separate post-answer gap box).
 
-### 6) Variant length guardrails
+### 5) Variant length guardrails
 
 Variant generation is constrained to keep prompts concise:
 
@@ -93,7 +83,7 @@ Variant generation is constrained to keep prompts concise:
 - one automatic shorten pass runs if over limit
 - if still too long, a hard fallback truncation enforces limits
 
-### 7) Card Ideas creation behavior
+### 6) Card Ideas creation behavior
 
 - `Create Card` opens Anki’s **Add Note** dialog with prefilled Front/Back fields.
 - It creates a **new note/card**; it does not edit the original reviewed card.
@@ -188,11 +178,11 @@ Freeform grading payloads are normalized around these keys:
 
 - `alignment`: `aligned | partial | misaligned`
 - `alignment_note`: short explanation
+- `expected_answer`: concise AI answer target for the shown variant
 - `canonical_points`: key target points from canonical answer
 - `covered_points`: canonical points covered by learner response
 - `missed_points`: canonical points not covered by learner response
 - `coverage_pct`: coverage percentage derived from point overlap
-- `question_gap_points`: target points not really tested by variant/question target
 - `learning_feedback`: related conceptual notes
 - `incorrect`: incorrect claims in learner response
 - `overall`: one-line summary
@@ -210,6 +200,7 @@ Pre-fetching and caching minimize live API calls during review.
 
 - **Ctrl+Shift+P**: Toggle Proteus generation on/off (`Cmd+Shift+P` on macOS)
 - **Ctrl+Shift+V**: Toggle flip/freeform mode (`Cmd+Shift+V` on macOS)
+- **Ctrl+Shift+B**: Toggle answer-side variant peek (`Cmd+Shift+B` on macOS)
 - **Enter** (in freeform textarea): Submit response and flip to answer
 
 ## Files

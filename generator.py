@@ -253,6 +253,7 @@ Rules:
 Return your evaluation as a JSON object with exactly these keys:
 - "alignment": string — one of "aligned", "partial", "misaligned"
 - "alignment_note": string — short reason for the alignment judgment
+- "expected_answer": string — concise answer target for the shown question
 - "canonical_points": array of strings — core answer points to check
 - "covered_points": array of strings — canonical points the learner covered
 - "missed_points": array of strings — canonical points the learner missed
@@ -270,6 +271,7 @@ Coverage rule:
 
 Output limits (strict):
 - "alignment_note": max 18 words.
+- "expected_answer": max 28 words.
 - "overall": max 18 words.
 - Each array item: max 14 words.
 - Max 2 items in "learning_feedback".
@@ -369,6 +371,7 @@ def _normalize_grading_payload(data: dict) -> dict:
         alignment = "aligned"
 
     alignment_note = str(data.get("alignment_note", "")).strip()
+    expected_answer = str(data.get("expected_answer", "")).strip()
     learning_feedback = _uniq_clean_list(data.get("learning_feedback", []), limit=2)
     canonical_points = _uniq_clean_list(data.get("canonical_points", []), limit=3)
     covered_points = _uniq_clean_list(
@@ -385,6 +388,9 @@ def _normalize_grading_payload(data: dict) -> dict:
 
     if not canonical_points:
         canonical_points = _uniq_clean_list(covered_points + missed_points, limit=3)
+
+    if not expected_answer and canonical_points:
+        expected_answer = "; ".join(canonical_points[:3])
 
     if canonical_points:
         canonical_set = set(canonical_points)
@@ -445,6 +451,7 @@ def _normalize_grading_payload(data: dict) -> dict:
     return {
         "alignment": alignment,
         "alignment_note": alignment_note,
+        "expected_answer": expected_answer,
         "canonical_points": canonical_points,
         "covered_points": covered_points,
         "missed_points": missed_points,
@@ -468,6 +475,7 @@ def _parse_partial_grading_payload(raw: str) -> Optional[dict]:
     data = {
         "alignment": _extract_json_string_field(raw, "alignment") or "aligned",
         "alignment_note": _extract_json_string_field(raw, "alignment_note"),
+        "expected_answer": _extract_json_string_field(raw, "expected_answer"),
         "canonical_points": _extract_json_string_list_field(raw, "canonical_points", limit=3),
         "covered_points": _extract_json_string_list_field(raw, "covered_points", limit=3),
         "missed_points": _extract_json_string_list_field(raw, "missed_points", limit=3),
@@ -483,6 +491,7 @@ def _parse_partial_grading_payload(raw: str) -> Optional[dict]:
 
     has_signal = any([
         data["alignment_note"],
+        data["expected_answer"],
         data["canonical_points"],
         data["covered_points"],
         data["missed_points"],
@@ -509,7 +518,7 @@ def grade_response(
     Grade a freeform response against the canonical answer.
 
     Returns a dict with keys: alignment, alignment_note, canonical_points,
-    covered_points, missed_points, coverage_pct, question_gap_points,
+    expected_answer, covered_points, missed_points, coverage_pct, question_gap_points,
     learning_feedback, incorrect, overall (plus back-compat aliases).
     Falls back to a neutral structured payload if JSON parsing fails.
     Returns None on API failure.
@@ -564,6 +573,7 @@ def grade_response(
         return {
             "alignment": "aligned",
             "alignment_note": "",
+            "expected_answer": "",
             "canonical_points": [],
             "covered_points": [],
             "missed_points": [],

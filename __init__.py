@@ -126,6 +126,12 @@ def init_addon():
     enabled_action.triggered.connect(toggle_proteus_enabled)
     mw.form.menuTools.addAction(enabled_action)
 
+    # Add answer-side variant peek shortcut (Cmd/Ctrl+Shift+B)
+    peek_action = QAction("Toggle Variant Peek (After Answer)", mw)
+    peek_action.setShortcut("Ctrl+Shift+B")
+    peek_action.triggered.connect(toggle_variant_peek)
+    mw.form.menuTools.addAction(peek_action)
+
     # Add usage stats menu item
     usage_action = QAction("Proteus Usage Stats", mw)
     usage_action.triggered.connect(show_usage_dialog)
@@ -182,6 +188,35 @@ def toggle_proteus_enabled():
     else:
         tooltip("Proteus: disabled")
         _cancel_batch_prefetch()
+
+
+def toggle_variant_peek():
+    # type: () -> None
+    """Toggle the inline variant-question peek panel on the answer side."""
+    if not mw.reviewer or not mw.reviewer.web:
+        return
+    if not _current_variant:
+        tooltip("Proteus: no active variant on this card")
+        return
+
+    reviewer_state = str(getattr(mw.reviewer, "state", "") or "")
+    if reviewer_state != "answer":
+        tooltip("Proteus: variant peek is available after Show Answer")
+        return
+
+    mw.reviewer.web.eval(
+        """
+        (function() {
+            var panel = document.getElementById('proteus-variant-peek');
+            if (!panel) { return; }
+            var visible = panel.style.display !== 'none';
+            panel.style.display = visible ? 'none' : 'block';
+            if (!visible && panel.scrollIntoView) {
+                panel.scrollIntoView({behavior: 'smooth', block: 'start'});
+            }
+        })();
+        """
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -316,15 +351,17 @@ def on_card_will_show(text: str, card, kind: str) -> str:
         elif kind.endswith("Answer"):
             if _current_variant and _current_variant_id is not None:
                 extra = ""
-                post_answer = ""
+                expected = ""
+                peek_panel = _variant_peek_html()
                 if CONFIG.get("response_mode") == "freeform" and _user_response.strip():
+                    expected = _expected_answer_html()
                     extra = _evaluation_html()
-                    post_answer = _question_gap_html()
                 return (
-                    extra
-                    + _feedback_buttons_html(card.id, _current_variant_id)
+                    expected
                     + text
-                    + post_answer
+                    + extra
+                    + _feedback_buttons_html(card.id, _current_variant_id)
+                    + peek_panel
                 )
 
             return text
@@ -410,9 +447,9 @@ def _set_evaluation_message(message):
     mw.reviewer.web.eval(js)
 
 
-def _set_gap_message(message):
+def _set_expected_answer_message(message):
     # type: (str) -> None
-    """Render a plain message in the question-gap box."""
+    """Render a plain message in the expected-answer box."""
     if not (mw.reviewer and mw.reviewer.web):
         return
     rendered = (
@@ -423,7 +460,7 @@ def _set_gap_message(message):
     js_str = json.dumps(rendered)
     js = f"""
     (function() {{
-        var el = document.getElementById('variant-question-gaps');
+        var el = document.getElementById('variant-expected-answer');
         if (el) {{
             el.innerHTML = {js_str};
         }}
@@ -453,69 +490,48 @@ def _render_saved_evaluation():
         return html.escape(str(_evaluation_text)).replace("\n", "<br>")
 
 
-def _render_question_gap_content(data):
-    # type: (dict) -> str
-    """Return inner HTML for the post-answer question-gap view."""
-    alignment = str(data.get("alignment", "aligned")).strip().lower()
-    if alignment not in ("aligned", "partial", "misaligned"):
-        alignment = "aligned"
-    coverage_pct, canonical_points, _covered_points, missed_points = _eval_coverage_pct(
-        data, alignment
-    )
+def _render_expected_answer_content(data):
+    # type: (dict) -> Optional[str]
+    """Render answer-target text from grading payload."""
+    expected_answer = str(data.get("expected_answer", "")).strip()
 
-    variant_gaps = _eval_list(data, "question_gap_points")
-    response_gaps = list(missed_points)
+    if not expected_answer:
+        canonical_points = data.get("canonical_points")
+        if isinstance(canonical_points, list):
+            points = []
+            for item in canonical_points:
+                text = str(item).strip()
+                if text:
+                    points.append(text)
+                if len(points) >= 3:
+                    break
+            if points:
+                expected_answer = "; ".join(points)
 
-    # "This Proteus pass" means both question-target and response coverage gaps.
-    gaps = []
-    seen = set()
-    for item in (response_gaps + variant_gaps):
-        text = str(item).strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        gaps.append(text)
+    if not expected_answer:
+        return None
 
-    if not gaps and alignment == "misaligned":
-        gaps = list(canonical_points)
-
-    if not gaps:
-        if coverage_pct is not None and coverage_pct < 100:
-            return (
-                "<span style='color: #777; font-style: italic;'>"
-                "Target-gap details unavailable."
-                "</span>"
-            )
-        return (
-            "<span style='color: #777; font-style: italic;'>"
-            "Nothing obvious left uncovered in this Proteus pass."
-            "</span>"
-        )
-
-    bullets = "".join(
-        f"<li style='margin-bottom: 4px;'>{html.escape(item)}</li>"
-        for item in gaps
-    )
     return (
-        "<div style='color: #666; font-size: 0.85em; margin-bottom: 6px;'>"
-        "<b>Not covered in this Proteus pass:</b>"
-        "</div>"
-        "<ul style='margin: 0; padding: 0 0 0 18px; font-size: 0.9em;'>"
-        + bullets
-        + "</ul>"
+        "<div style='margin-bottom: 4px; color: #666; font-size: 0.84em;'>"
+        "<b>AI answer target</b></div>"
+        "<div>"
+        + html.escape(expected_answer).replace("\n", "<br>")
+        + "</div>"
     )
 
 
-def _render_saved_question_gaps():
+def _render_saved_expected_answer():
     # type: () -> Optional[str]
-    """Return rendered HTML for any saved question-gap content, or None."""
+    """Return rendered expected-answer HTML when available."""
     if not _evaluation_text:
         return None
     try:
         data = json.loads(_evaluation_text)
-        return _render_question_gap_content(data)
     except (json.JSONDecodeError, ValueError, TypeError):
         return None
+    if not isinstance(data, dict):
+        return None
+    return _render_expected_answer_content(data)
 
 
 def _cancel_grading_watchdog():
@@ -626,34 +642,32 @@ def _eval_coverage_pct(data, alignment):
     return (coverage_pct, canonical_points, covered_points, missed_points)
 
 
-def _coverage_meter_html(coverage_pct):
+def _coverage_cell_html(coverage_pct):
     # type: (Optional[int]) -> str
-    """Build a compact donut meter HTML for answer coverage."""
+    """Build compact target-coverage content for a table cell."""
     if coverage_pct is None:
-        return ""
+        return '<span style="color: #666; font-size: 0.9em;">n/a</span>'
 
     dark_gray = "#5f6368"
     light_gray = "#d9dce1"
 
     return (
-        '<div style="min-width: 78px; text-align: center; margin-left: auto;">'
-        '<div style="width: 64px; height: 64px; border-radius: 50%; '
+        '<div style="display: flex; justify-content: center;">'
+        '<div style="width: 52px; height: 52px; border-radius: 50%; '
         f'background: conic-gradient({dark_gray} {coverage_pct}%, '
         f'{light_gray} {coverage_pct}%); '
-        'position: relative; margin-left: auto;">'
-        '<div style="position: absolute; inset: 9px; border-radius: 50%; background: #fff; '
+        'position: relative;">'
+        '<div style="position: absolute; inset: 8px; border-radius: 50%; background: #fff; '
         'display: flex; align-items: center; justify-content: center; '
-        'font-size: 0.78em; color: #444; font-weight: 600;">'
+        'font-size: 0.74em; color: #444; font-weight: 600;">'
         f'{coverage_pct}%'
-        '</div></div>'
-        '<div style="margin-top: 4px; font-size: 0.75em; color: #666;">Target coverage</div>'
-        '</div>'
+        "</div></div></div>"
     )
 
 
 def _render_evaluation_html(data):
     # type: (dict) -> str
-    """Build color-coded HTML from structured grading data with coverage meter."""
+    """Build color-coded HTML from structured grading data."""
     incorrect = _eval_list(data, "incorrect")
     overall = str(data.get("overall", ""))
     alignment_note = str(data.get("alignment_note", ""))
@@ -696,14 +710,14 @@ def _render_evaluation_html(data):
             )
             parts.append(
                 '<table style="width: 100%; border-collapse: collapse;'
-                ' margin-bottom: 8px; table-layout: fixed;">'
+                ' margin-bottom: 8px; table-layout: fixed; border: 1px solid #ddd;">'
                 '<tr>'
                 '<td style="padding: 6px 8px; font-weight: bold; color: #1e88e5;'
-                ' background: #e3f2fd; border-bottom: 2px solid #1e88e5;'
+                ' background: #e3f2fd; border: 1px solid #ddd;'
                 ' vertical-align: top;">Related</td>'
                 '</tr>'
                 '<tr>'
-                '<td style="padding: 6px 8px; vertical-align: top;">'
+                '<td style="padding: 6px 8px; vertical-align: top; border: 1px solid #ddd;">'
                 '<ul style="margin: 0; padding: 0 0 0 14px; font-size: 0.9em;">'
                 + bullets +
                 '</ul></td>'
@@ -713,14 +727,50 @@ def _render_evaluation_html(data):
         return "".join(parts)
 
     columns = [
-        (covered_points, "Covered",   "#66bb6a", "#e8f5e9"),
-        (missed_points,  "Missed",    "#ffa726", "#fff8e1"),
-        (incorrect, "Incorrect", "#ef5350", "#fce4ec"),
+        {
+            "items": covered_points,
+            "label": "Addressed",
+            "color": "#66bb6a",
+            "bg": "#e8f5e9",
+        },
+        {
+            "items": missed_points,
+            "label": "Remaining target points",
+            "color": "#ffa726",
+            "bg": "#fff8e1",
+        },
+        {
+            "items": incorrect,
+            "label": "Incorrect",
+            "color": "#ef5350",
+            "bg": "#fce4ec",
+        },
     ]
     if learning_feedback:
-        columns.append((learning_feedback, "Related", "#1e88e5", "#e3f2fd"))
-    # Only include columns that have items
-    active = [(items, label, color, bg) for items, label, color, bg in columns if items]
+        columns.append({
+            "items": learning_feedback,
+            "label": "Related",
+            "color": "#1e88e5",
+            "bg": "#e3f2fd",
+        })
+    if coverage_pct is not None:
+        columns.append({
+            "items": None,
+            "label": "Target coverage",
+            "color": "#5f6368",
+            "bg": "#f2f3f5",
+            "coverage_pct": coverage_pct,
+        })
+
+    # Only include populated columns (plus coverage meter column)
+    active = []
+    for col in columns:
+        items = col.get("items")
+        if items:
+            active.append(col)
+            continue
+        if col.get("coverage_pct") is not None:
+            active.append(col)
 
     if not active and not overall:
         return html.escape(str(data))
@@ -736,49 +786,52 @@ def _render_evaluation_html(data):
     if overall:
         header_lines.append(overall)
 
-    if header_lines or coverage_pct is not None:
-        header_html = "".join(
+    if header_lines:
+        parts.extend(
             '<div style="margin-bottom: 4px; font-style: italic; color: #555;">'
             + html.escape(line)
             + '</div>'
             for line in header_lines
         )
-        parts.append(
-            '<div style="display: flex; align-items: flex-start; gap: 12px; '
-            'justify-content: space-between; margin-bottom: 8px;">'
-            '<div style="flex: 1;">' + header_html + '</div>'
-            + _coverage_meter_html(coverage_pct) +
-            '</div>'
-        )
 
     # Separator + columnar table
     if active:
-        if parts:
-            parts.append(
-                '<hr style="border: none; border-top: 1px solid #ddd; margin: 8px 0;">'
-            )
         n = len(active)
         pct = int(100 / n)
         cells_header = ""
         cells_body = ""
-        for items, label, color, bg in active:
+        for col in active:
+            items = col.get("items")
+            label = str(col.get("label", ""))
+            color = str(col.get("color", "#666"))
+            bg = str(col.get("bg", "#fafafa"))
             cells_header += (
                 f'<td style="width:{pct}%; padding: 6px 8px; font-weight: bold;'
-                f' color: {color}; background: {bg}; border-bottom: 2px solid {color};'
+                f' color: {color}; background: {bg}; border: 1px solid #ddd;'
                 f' vertical-align: top;">{label}</td>'
             )
-            bullets = "".join(
-                f'<li style="margin-bottom: 4px;">{html.escape(str(item))}</li>'
-                for item in items
-            )
-            cells_body += (
-                f'<td style="width:{pct}%; padding: 6px 8px; vertical-align: top;">'
-                f'<ul style="margin: 0; padding: 0 0 0 14px; font-size: 0.9em;">'
-                f'{bullets}</ul></td>'
-            )
+            coverage_value = col.get("coverage_pct")
+            if coverage_value is not None:
+                body_html = _coverage_cell_html(coverage_value)
+                cells_body += (
+                    f'<td style="width:{pct}%; padding: 6px 8px; vertical-align: top;'
+                    f' border: 1px solid #ddd; text-align: center;">'
+                    f'{body_html}</td>'
+                )
+            else:
+                bullets = "".join(
+                    f'<li style="margin-bottom: 4px;">{html.escape(str(item))}</li>'
+                    for item in items
+                )
+                cells_body += (
+                    f'<td style="width:{pct}%; padding: 6px 8px; vertical-align: top;'
+                    f' border: 1px solid #ddd;">'
+                    f'<ul style="margin: 0; padding: 0 0 0 14px; font-size: 0.9em;">'
+                    f'{bullets}</ul></td>'
+                )
         parts.append(
             f'<table style="width: 100%; border-collapse: collapse;'
-            f' margin-bottom: 8px; table-layout: fixed;">'
+            f' margin-bottom: 8px; table-layout: fixed; border: 1px solid #ddd;">'
             f'<tr>{cells_header}</tr>'
             f'<tr>{cells_body}</tr>'
             f'</table>'
@@ -803,31 +856,35 @@ def _on_grading_done(card_id, evaluation_json):
     # Only persist evaluation if it belongs to the current card
     _evaluation_text = evaluation_json
 
+    expected_rendered = None
     try:
         data = json.loads(evaluation_json)
         rendered = _render_evaluation_html(data)
-        gap_rendered = _render_question_gap_content(data)
-    except (json.JSONDecodeError, ValueError):
+        if isinstance(data, dict):
+            expected_rendered = _render_expected_answer_content(data)
+    except (json.JSONDecodeError, ValueError, TypeError):
         rendered = html.escape(evaluation_json).replace("\n", "<br>")
-        gap_rendered = (
+
+    if not expected_rendered:
+        expected_rendered = (
             "<span style='color: #666; font-style: italic;'>"
-            "Target-gap analysis unavailable."
+            "Answer target unavailable."
             "</span>"
         )
 
     if mw.reviewer and mw.reviewer.web:
         # json.dumps produces a valid JS string literal (with quotes)
         js_str = json.dumps(rendered)
-        gap_js_str = json.dumps(gap_rendered)
+        expected_js_str = json.dumps(expected_rendered)
         js = f"""
         (function() {{
             var el = document.getElementById('variant-evaluation');
             if (el) {{
                 el.innerHTML = {js_str};
             }}
-            var gap = document.getElementById('variant-question-gaps');
-            if (gap) {{
-                gap.innerHTML = {gap_js_str};
+            var expectedEl = document.getElementById('variant-expected-answer');
+            if (expectedEl) {{
+                expectedEl.innerHTML = {expected_js_str};
             }}
         }})();
         """
@@ -846,7 +903,7 @@ def _on_grading_failed(card_id, error_message):
     _log(f"grading failed for card {card_id}: {error_message}")
     _evaluation_text = "Evaluation unavailable (timeout). You can still grade manually."
     _set_evaluation_message(_evaluation_text)
-    _set_gap_message("Target-gap analysis unavailable.")
+    _set_expected_answer_message("Answer target unavailable.")
 
 
 def _start_early_grading():
@@ -895,7 +952,6 @@ def on_answer_shown(card):
         _evaluation_text = "No response captured. Type or dictate in the box, then press Enter."
         _cancel_grading_watchdog()
         _set_evaluation_message(_evaluation_text)
-        _set_gap_message("Target-gap analysis requires a response.")
         return
 
     # Skip if early grading already started for this card
@@ -1260,25 +1316,49 @@ def _evaluation_html() -> str:
     """.format(rendered=rendered)
 
 
-def _question_gap_html() -> str:
-    """Post-answer box listing canonical targets not covered by the variant."""
-    rendered = _render_saved_question_gaps()
+def _expected_answer_html() -> str:
+    """AI answer-target box shown above the original answer."""
+    rendered = _render_saved_expected_answer()
     if not rendered:
-        rendered = '<span style="color: #888;">&#9203; Analyzing target gaps...</span>'
+        rendered = '<span style="color: #888;">&#9203; Generating answer target...</span>'
     return """
-    <div id="variant-question-gaps" style="
-        margin-top: 12px;
-        margin-bottom: 8px;
+    <div id="variant-expected-answer" style="
+        margin-bottom: 10px;
         padding: 10px 12px;
-        background: #fafafa;
-        border: 1px solid #e6e6e6;
+        background: #f8f9fa;
+        border: 1px solid #dcdfe3;
         border-radius: 6px;
         font-size: 0.9em;
-        line-height: 1.5;
+        line-height: 1.45;
     ">
         {rendered}
     </div>
     """.format(rendered=rendered)
+
+
+def _variant_peek_html() -> str:
+    """Hidden answer-side panel that can re-show the variant prompt on demand."""
+    variant = html.escape(str(_current_variant or ""))
+    response = html.escape(str(_user_response or "").strip())
+    response_html = ""
+    if response:
+        response_html = (
+            "<div style='margin-top: 8px; color: #666; font-size: 0.85em;'>"
+            "<b>Your response:</b> "
+            + response
+            + "</div>"
+        )
+    return (
+        '<div id="proteus-variant-peek" style="display: none; margin-top: 12px;'
+        ' margin-bottom: 8px; padding: 10px 12px; background: #fafafa;'
+        ' border: 1px solid #e6e6e6; border-radius: 6px; font-size: 0.9em; line-height: 1.5;">'
+        "<div style='color: #666; font-size: 0.85em; margin-bottom: 6px;'>"
+        "<b>Variant prompt (peek)</b>"
+        "</div>"
+        "<div>" + variant + "</div>"
+        + response_html +
+        "</div>"
+    )
 
 
 # ---------------------------------------------------------------------------
