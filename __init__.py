@@ -45,6 +45,7 @@ def _log(msg: str):
 def load_config():
     """Load config, merging user overrides with defaults."""
     defaults = {
+        "enabled": True,                  # master on/off toggle for Proteus variants
         "api_key": "",
         "model": "claude-sonnet-4-20250514",
         "response_mode": "flip",          # "flip" or "freeform"
@@ -60,6 +61,10 @@ def load_config():
         "debug_logging": False,            # write to proteus_diag.log
         "usage_budget": 5.00,              # monthly budget in USD (for progress bar)
         "submit_delay_ms": 750,            # ms delay after Enter before flipping to answer
+        "grading_model": "",               # optional override for grading model
+        "grading_max_tokens": 280,         # room for full grading schema
+        "grading_timeout_s": 10,           # fail fast if grading is slow
+        "feedback_mode": "both",           # "ai", "canonical", or "both"
     }
     conf = mw.addonManager.getConfig(__name__)
     if conf:
@@ -81,7 +86,9 @@ _current_card_id: int = None
 _user_response: str = ""              # captured from freeform text input
 _evaluation_text: str = None          # LLM grading result
 _grading_worker = None                # background grading QThread
+_grading_watchdog_seq: int = 0        # invalidate prior grading watchdog timers
 _ideas_saved_this_session: int = 0
+_idea_orphan_workers = []             # workers kept alive after ideas dialog closes
 
 # ---------------------------------------------------------------------------
 # Initialization
@@ -113,6 +120,24 @@ def init_addon():
     toggle_action.setShortcut("Ctrl+Shift+V")
     toggle_action.triggered.connect(toggle_response_mode)
     mw.form.menuTools.addAction(toggle_action)
+
+    # Add master on/off toggle shortcut (Cmd/Ctrl+Shift+P)
+    enabled_action = QAction("Toggle Proteus On/Off", mw)
+    enabled_action.setShortcut("Ctrl+Shift+P")
+    enabled_action.triggered.connect(toggle_proteus_enabled)
+    mw.form.menuTools.addAction(enabled_action)
+
+    # Add answer-side variant peek shortcut (Cmd/Ctrl+Shift+B)
+    peek_action = QAction("Toggle Variant Peek (After Answer)", mw)
+    peek_action.setShortcut("Ctrl+Shift+B")
+    peek_action.triggered.connect(toggle_variant_peek)
+    mw.form.menuTools.addAction(peek_action)
+
+    # Add back-to-question shortcut (Cmd/Ctrl+Shift+Left)
+    back_action = QAction("Back to Question", mw)
+    back_action.setShortcut("Ctrl+Shift+Left")
+    back_action.triggered.connect(go_back_to_question)
+    mw.form.menuTools.addAction(back_action)
 
     # Add usage stats menu item
     usage_action = QAction("Proteus Usage Stats", mw)
@@ -157,6 +182,66 @@ def toggle_response_mode():
             """)
 
 
+def toggle_proteus_enabled():
+    # type: () -> None
+    """Master toggle for enabling/disabling Proteus variants."""
+    global CONFIG
+    now_enabled = not bool(CONFIG.get("enabled", True))
+    CONFIG["enabled"] = now_enabled
+    if now_enabled:
+        tooltip("Proteus: enabled")
+        if mw.state == "review":
+            _start_batch_prefetch()
+    else:
+        tooltip("Proteus: disabled")
+        _cancel_batch_prefetch()
+
+
+def toggle_variant_peek():
+    # type: () -> None
+    """Toggle the inline variant-question peek panel on the answer side."""
+    if not mw.reviewer or not mw.reviewer.web:
+        return
+    if not _current_variant:
+        tooltip("Proteus: no active variant on this card")
+        return
+
+    reviewer_state = str(getattr(mw.reviewer, "state", "") or "")
+    if reviewer_state != "answer":
+        tooltip("Proteus: variant peek is available after Show Answer")
+        return
+
+    mw.reviewer.web.eval(
+        """
+        (function() {
+            var panel = document.getElementById('proteus-variant-peek');
+            if (!panel) { return; }
+            var visible = panel.style.display !== 'none';
+            panel.style.display = visible ? 'none' : 'block';
+            if (!visible && panel.scrollIntoView) {
+                panel.scrollIntoView({behavior: 'smooth', block: 'start'});
+            }
+        })();
+        """
+    )
+
+
+_returning_to_question = False  # flag to preserve state on re-show
+
+
+def go_back_to_question():
+    # type: () -> None
+    """Navigate from answer side back to question side, preserving freeform state."""
+    global _returning_to_question
+    if not mw.reviewer:
+        return
+    reviewer_state = str(getattr(mw.reviewer, "state", "") or "")
+    if reviewer_state != "answer":
+        return
+    _returning_to_question = True
+    mw.reviewer._showQuestion()
+
+
 # ---------------------------------------------------------------------------
 # Card eligibility
 # ---------------------------------------------------------------------------
@@ -185,6 +270,9 @@ def _has_enough_text(card) -> bool:
 
 def should_transform(card) -> bool:
     """Decide whether this card should get a variant."""
+    if not CONFIG.get("enabled", True):
+        return False
+
     if not CONFIG.get("api_key"):
         return False
 
@@ -223,6 +311,9 @@ def should_prefetch(card) -> bool:
     prefetch eligible cards.  The random roll at review time decides
     whether to actually show the variant or the original.
     """
+    if not CONFIG.get("enabled", True):
+        return False
+
     if not CONFIG.get("api_key"):
         return False
 
@@ -258,6 +349,18 @@ def on_card_will_show(text: str, card, kind: str) -> str:
 
     try:
         if kind.endswith("Question"):
+            global _returning_to_question
+
+            # Re-showing the same card (back from answer) — preserve state
+            if _returning_to_question and card.id == _current_card_id and _current_variant:
+                _returning_to_question = False
+                styled_variant = _wrap_variant_html(_current_variant)
+                styled_variant += _feedback_buttons_html(card.id, _current_variant_id)
+                if CONFIG.get("response_mode") == "freeform":
+                    styled_variant += _freeform_input_html()
+                return styled_variant
+
+            _returning_to_question = False
             _evaluation_text = None
             _current_variant = None
             _current_variant_id = None
@@ -273,7 +376,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             if result:
                 _current_variant_id, _current_variant = result
                 styled_variant = _wrap_variant_html(_current_variant)
-                styled_variant += _feedback_buttons_html()
+                styled_variant += _feedback_buttons_html(card.id, _current_variant_id)
                 if CONFIG.get("response_mode") == "freeform":
                     styled_variant += _freeform_input_html()
                 return styled_variant
@@ -282,10 +385,27 @@ def on_card_will_show(text: str, card, kind: str) -> str:
 
         elif kind.endswith("Answer"):
             if _current_variant and _current_variant_id is not None:
-                extra = ""
+                peek_panel = _variant_peek_html()
+                eval_html = ""
                 if CONFIG.get("response_mode") == "freeform" and _user_response.strip():
-                    extra = _evaluation_html()
-                return extra + _feedback_buttons_html() + text
+                    eval_rendered = _render_saved_evaluation()
+                    if eval_rendered:
+                        eval_html = (
+                            '<div style="margin-top: 12px; margin-bottom: 4px;'
+                            ' font-size: 0.84em; color: #666;">'
+                            '<b>Feedback w.r.t. canonical content</b></div>'
+                            '<div style="margin-bottom: 8px;'
+                            ' padding: 12px 14px; background: #f8f9fa;'
+                            ' border: 1px solid #e0e0e0; border-radius: 6px;'
+                            ' font-size: 0.9em; line-height: 1.5;">'
+                            + eval_rendered + '</div>'
+                        )
+                return (
+                    eval_html
+                    + text
+                    + _feedback_buttons_html(card.id, _current_variant_id)
+                    + peek_panel
+                )
 
             return text
     except Exception as e:
@@ -299,13 +419,69 @@ def on_card_will_show(text: str, card, kind: str) -> str:
 # ---------------------------------------------------------------------------
 
 def on_question_shown(card):
-    """After showing question, pre-fetch variant for next card."""
+    """After showing question, pre-fetch next card and restore freeform state if returning."""
     _prefetch_next_card()
+    _restore_freeform_state()
+
+
+def _restore_freeform_state():
+    """Re-inject saved response and evaluation into the question page after re-show."""
+    if not _user_response.strip() or not _current_variant:
+        return
+    if not (mw.reviewer and mw.reviewer.web):
+        return
+
+    parts = []
+
+    # Restore textarea value and disable it
+    response_js = json.dumps(_user_response)
+    parts.append(f"""
+        var ta = document.getElementById('variant-response-input');
+        if (ta) {{
+            ta.value = {response_js};
+            ta.disabled = true;
+            ta.style.opacity = '0.5';
+        }}
+    """)
+
+    # Restore evaluation if available
+    if _evaluation_text:
+        try:
+            data = json.loads(_evaluation_text)
+            rendered = _render_evaluation_html(data, mode="question")
+            expected_rendered = None
+            if isinstance(data, dict):
+                expected_rendered = _render_expected_answer_content(data)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            rendered = html.escape(str(_evaluation_text)).replace("\n", "<br>")
+            expected_rendered = None
+
+        if not expected_rendered:
+            expected_rendered = (
+                "<span style='color: #666; font-style: italic;'>"
+                "Answer target unavailable.</span>"
+            )
+
+        eval_js = json.dumps(rendered)
+        expected_js = json.dumps(expected_rendered)
+        parts.append(f"""
+            var el = document.getElementById('variant-evaluation');
+            if (el) {{ el.innerHTML = {eval_js}; el.style.display = 'block'; }}
+            var hdr = document.getElementById('variant-evaluation-header');
+            if (hdr) {{ hdr.style.display = 'block'; }}
+            var exp = document.getElementById('variant-expected-answer');
+            if (exp) {{ exp.innerHTML = {expected_js}; exp.style.display = 'block'; }}
+        """)
+
+    if parts:
+        js = "(function() {" + "".join(parts) + "})();"
+        mw.reviewer.web.eval(js)
 
 
 class _GradingWorker(QThread):
     """Background worker for LLM grading so the UI doesn't freeze."""
-    done = pyqtSignal(int, str)  # (card_id, evaluation_json)
+    done = pyqtSignal(object, str)    # (card_id, evaluation_json)
+    failed = pyqtSignal(object, str)  # (card_id, error_message)
 
     def __init__(self, card_id, variant_question, user_response, canonical_answer, config):
         super().__init__()
@@ -325,8 +501,10 @@ class _GradingWorker(QThread):
             )
             if result:
                 self.done.emit(self._card_id, json.dumps(result))
+            else:
+                self.failed.emit(self._card_id, "LLM grading timed out or failed")
         except Exception as e:
-            print(f"[Proteus] Grading failed: {e}")
+            self.failed.emit(self._card_id, str(e))
 
 
 def _cleanup_grading_worker():
@@ -337,74 +515,383 @@ def _cleanup_grading_worker():
             _grading_worker.done.disconnect()
         except (TypeError, RuntimeError):
             pass
+        try:
+            _grading_worker.failed.disconnect()
+        except (TypeError, RuntimeError):
+            pass
         _grading_worker.deleteLater()
         _grading_worker = None
 
 
-def _render_evaluation_html(data):
-    # type: (dict) -> str
-    """Build color-coded HTML from structured grading data in a columnar layout."""
-    correct = data.get("correct", [])
-    incorrect = data.get("incorrect", [])
-    missed = data.get("missed", [])
-    overall = data.get("overall", "")
-    score = data.get("score", 0)
+def _set_evaluation_message(message):
+    # type: (str) -> None
+    """Render a plain message in the evaluation box."""
+    if not (mw.reviewer and mw.reviewer.web):
+        return
+    rendered = (
+        "<span style='color: #666; font-style: italic;'>"
+        + html.escape(message)
+        + "</span>"
+    )
+    js_str = json.dumps(rendered)
+    js = f"""
+    (function() {{
+        var el = document.getElementById('variant-evaluation');
+        if (el) {{
+            el.innerHTML = {js_str};
+            el.style.display = 'block';
+        }}
+        var hdr = document.getElementById('variant-evaluation-header');
+        if (hdr) {{ hdr.style.display = 'block'; }}
+    }})();
+    """
+    mw.reviewer.web.eval(js)
 
-    columns = [
-        (correct,   "Correct",   "#66bb6a", "#e8f5e9"),
-        (incorrect, "Incorrect", "#ef5350", "#fce4ec"),
-        (missed,    "Missed",    "#ffa726", "#fff8e1"),
-    ]
-    # Only include columns that have items
-    active = [(items, label, color, bg) for items, label, color, bg in columns if items]
+
+def _set_expected_answer_message(message):
+    # type: (str) -> None
+    """Render a plain message in the expected-answer box."""
+    if not (mw.reviewer and mw.reviewer.web):
+        return
+    rendered = (
+        "<span style='color: #666; font-style: italic;'>"
+        + html.escape(message)
+        + "</span>"
+    )
+    js_str = json.dumps(rendered)
+    js = f"""
+    (function() {{
+        var el = document.getElementById('variant-expected-answer');
+        if (el) {{
+            el.innerHTML = {js_str};
+            el.style.display = 'block';
+        }}
+    }})();
+    """
+    mw.reviewer.web.eval(js)
+
+
+def _card_ids_match(card_id):
+    # type: (object) -> bool
+    """Robustly compare signal card id with current card id."""
+    try:
+        return int(card_id) == int(_current_card_id)
+    except Exception:
+        return str(card_id) == str(_current_card_id)
+
+
+def _render_saved_evaluation(mode="answer"):
+    # type: (str) -> Optional[str]
+    """Return rendered HTML for any saved evaluation text, or None."""
+    if not _evaluation_text:
+        return None
+    try:
+        data = json.loads(_evaluation_text)
+        return _render_evaluation_html(data, mode=mode)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return html.escape(str(_evaluation_text)).replace("\n", "<br>")
+
+
+def _render_expected_answer_content(data):
+    # type: (dict) -> Optional[str]
+    """Render answer-target text from grading payload."""
+    expected_answer = str(data.get("expected_answer", "")).strip()
+
+    if not expected_answer:
+        canonical_points = data.get("canonical_points")
+        if isinstance(canonical_points, list):
+            points = []
+            for item in canonical_points:
+                text = str(item).strip()
+                if text:
+                    points.append(text)
+                if len(points) >= 3:
+                    break
+            if points:
+                expected_answer = "; ".join(points)
+
+    if not expected_answer:
+        return None
+
+    return (
+        "<div style='margin-bottom: 4px; color: #666; font-size: 0.84em;'>"
+        "<b>AI answer target</b></div>"
+        "<div>"
+        + html.escape(expected_answer).replace("\n", "<br>")
+        + "</div>"
+    )
+
+
+def _render_saved_expected_answer():
+    # type: () -> Optional[str]
+    """Return rendered expected-answer HTML when available."""
+    if not _evaluation_text:
+        return None
+    try:
+        data = json.loads(_evaluation_text)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return _render_expected_answer_content(data)
+
+
+def _cancel_grading_watchdog():
+    # type: () -> None
+    """Invalidate any pending grading watchdog callbacks."""
+    global _grading_watchdog_seq
+    _grading_watchdog_seq += 1
+
+
+def _start_grading_watchdog(card_id):
+    # type: (int) -> None
+    """Show fallback text if grading gets stuck beyond timeout budget."""
+    global _grading_watchdog_seq
+    _grading_watchdog_seq += 1
+    seq = _grading_watchdog_seq
+    timeout_s = float(CONFIG.get("grading_timeout_s", 10))
+    delay_ms = int((timeout_s + 2.0) * 1000)
+
+    def _watchdog_fire():
+        # type: () -> None
+        if seq != _grading_watchdog_seq:
+            return
+        if card_id != _current_card_id:
+            return
+        if _grading_worker and _grading_worker.isRunning():
+            _log(f"grading watchdog fired for card {card_id}")
+            _set_evaluation_message(
+                "Evaluation is taking longer than expected. "
+                "You can grade manually."
+            )
+
+    QTimer.singleShot(delay_ms, _watchdog_fire)
+
+
+def _safe_str_list(data, key):
+    # type: (dict, str) -> list
+    """Read a list-of-strings field from an already-normalized grading payload."""
+    items = data.get(key)
+    if not isinstance(items, list):
+        return []
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
+def _coverage_cell_html(coverage_pct):
+    # type: (Optional[int]) -> str
+    """Build compact target-coverage content for a table cell."""
+    if coverage_pct is None:
+        return '<span style="color: #666; font-size: 0.9em;">n/a</span>'
+
+    dark_gray = "#5f6368"
+    light_gray = "#d9dce1"
+
+    return (
+        '<div style="display: flex; justify-content: center;">'
+        '<div style="width: 52px; height: 52px; border-radius: 50%; '
+        f'background: conic-gradient({dark_gray} {coverage_pct}%, '
+        f'{light_gray} {coverage_pct}%); '
+        'position: relative;">'
+        '<div style="position: absolute; inset: 8px; border-radius: 50%; background: #fff; '
+        'display: flex; align-items: center; justify-content: center; '
+        'font-size: 0.74em; color: #444; font-weight: 600;">'
+        f'{coverage_pct}%'
+        "</div></div></div>"
+    )
+
+
+def _render_evaluation_html(data, mode="answer"):
+    # type: (dict, str) -> str
+    """Build color-coded HTML from structured grading data.
+
+    mode="question": feedback vs AI answer — addressed, incorrect, related.
+    mode="answer":   feedback vs canonical — addressed, remaining, incorrect, coverage donut.
+
+    Expects data already normalized by generator._normalize_grading_payload.
+    """
+    incorrect = _safe_str_list(data, "incorrect")
+    overall = str(data.get("overall", ""))
+    alignment_note = str(data.get("alignment_note", ""))
+    alignment = str(data.get("alignment", "aligned")).strip().lower()
+    if alignment not in ("aligned", "partial", "misaligned"):
+        alignment = "aligned"
+    learning_feedback = _safe_str_list(data, "learning_feedback")
+    covered_points = _safe_str_list(data, "covered_points")
+    missed_points = _safe_str_list(data, "missed_points")
+    coverage_pct = data.get("coverage_pct")  # already computed by normalizer
+
+    if alignment == "misaligned":
+        parts = [
+            '<div style="margin-bottom: 8px; font-style: italic; color: #555;">'
+            'Question drifted from canonical target.'
+            '</div>'
+        ]
+
+        related = []
+        seen = set()
+        for item in (learning_feedback + covered_points + incorrect + missed_points):
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            related.append(text)
+
+        detail = overall.strip() or alignment_note.strip()
+        if detail and detail.lower() != "question drifted from canonical target.":
+            parts.append(
+                '<div style="margin-bottom: 8px; color: #4d4d4d;">'
+                + html.escape(detail)
+                + "</div>"
+            )
+
+        if related:
+            bullets = "".join(
+                f'<li style="margin-bottom: 4px;">{html.escape(str(item))}</li>'
+                for item in related
+            )
+            parts.append(
+                '<table style="width: 100%; border-collapse: collapse;'
+                ' margin-bottom: 8px; table-layout: fixed; border: 1px solid #ddd;">'
+                '<tr>'
+                '<td style="padding: 6px 8px; font-weight: bold; color: #1e88e5;'
+                ' background: #e3f2fd; border: 1px solid #ddd;'
+                ' vertical-align: top;">Related</td>'
+                '</tr>'
+                '<tr>'
+                '<td style="padding: 6px 8px; vertical-align: top; border: 1px solid #ddd;">'
+                '<ul style="margin: 0; padding: 0 0 0 14px; font-size: 0.9em;">'
+                + bullets +
+                '</ul></td>'
+                '</tr>'
+                '</table>'
+            )
+        return "".join(parts)
+
+    feedback_mode = str(CONFIG.get("feedback_mode", "both")).strip().lower()
+
+    if mode == "question":
+        # Question side: use ai_* fields when available (both/ai modes)
+        if feedback_mode in ("ai", "both"):
+            ai_covered = _safe_str_list(data, "ai_covered_points") or covered_points
+            ai_missed = _safe_str_list(data, "ai_missed_points")
+            ai_pct = data.get("ai_coverage_pct")
+            columns = [
+                {"items": ai_covered, "label": "Addressed",
+                 "color": "#66bb6a", "bg": "#e8f5e9"},
+                {"items": ai_missed, "label": "Missed",
+                 "color": "#ffa726", "bg": "#fff8e1"},
+                {"items": incorrect, "label": "Incorrect",
+                 "color": "#ef5350", "bg": "#fce4ec"},
+            ]
+            if learning_feedback:
+                columns.append({"items": learning_feedback, "label": "Related",
+                                "color": "#1e88e5", "bg": "#e3f2fd"})
+            if ai_pct is not None:
+                columns.append({"items": None, "label": "AI coverage",
+                                "color": "#5f6368", "bg": "#f2f3f5",
+                                "coverage_pct": ai_pct})
+        else:
+            # canonical-only mode: minimal question side
+            columns = [
+                {"items": covered_points, "label": "Addressed",
+                 "color": "#66bb6a", "bg": "#e8f5e9"},
+                {"items": incorrect, "label": "Incorrect",
+                 "color": "#ef5350", "bg": "#fce4ec"},
+            ]
+            if learning_feedback:
+                columns.append({"items": learning_feedback, "label": "Related",
+                                "color": "#1e88e5", "bg": "#e3f2fd"})
+    else:
+        if feedback_mode == "ai":
+            # ai-only mode: no answer-side feedback
+            return ""
+        # Answer side: canonical coverage
+        columns = [
+            {"items": covered_points, "label": "Addressed",
+             "color": "#66bb6a", "bg": "#e8f5e9"},
+            {"items": missed_points, "label": "Remaining target points",
+             "color": "#ffa726", "bg": "#fff8e1"},
+            {"items": incorrect, "label": "Incorrect",
+             "color": "#ef5350", "bg": "#fce4ec"},
+        ]
+        if learning_feedback:
+            columns.append({"items": learning_feedback, "label": "Related",
+                            "color": "#1e88e5", "bg": "#e3f2fd"})
+        if coverage_pct is not None:
+            columns.append({"items": None, "label": "Target coverage",
+                            "color": "#5f6368", "bg": "#f2f3f5",
+                            "coverage_pct": coverage_pct})
+
+    # Only include populated columns (plus coverage meter column)
+    active = []
+    for col in columns:
+        items = col.get("items")
+        if items:
+            active.append(col)
+            continue
+        if col.get("coverage_pct") is not None:
+            active.append(col)
 
     if not active and not overall:
         return html.escape(str(data))
 
     parts = []
 
-    # Overall summary + score on top
-    if overall or score >= 1:
-        summary = ""
-        if overall:
-            summary += html.escape(overall)
-        if score >= 1:
-            if summary:
-                summary += f' &mdash; '
-            summary += f'<b>{score}/5</b>'
-        parts.append(
-            f'<div style="margin-bottom: 8px; font-style: italic; color: #555;">'
-            f'{summary}</div>'
+    header_lines = []
+    if alignment == "partial":
+        msg = "Partial alignment."
+        if alignment_note:
+            msg += " " + alignment_note
+        header_lines.append(msg)
+    if overall:
+        header_lines.append(overall)
+
+    if header_lines:
+        parts.extend(
+            '<div style="margin-bottom: 4px; font-style: italic; color: #555;">'
+            + html.escape(line)
+            + '</div>'
+            for line in header_lines
         )
 
     # Separator + columnar table
     if active:
-        if parts:
-            parts.append(
-                '<hr style="border: none; border-top: 1px solid #ddd; margin: 8px 0;">'
-            )
         n = len(active)
         pct = int(100 / n)
         cells_header = ""
         cells_body = ""
-        for items, label, color, bg in active:
+        for col in active:
+            items = col.get("items")
+            label = str(col.get("label", ""))
+            color = str(col.get("color", "#666"))
+            bg = str(col.get("bg", "#fafafa"))
             cells_header += (
                 f'<td style="width:{pct}%; padding: 6px 8px; font-weight: bold;'
-                f' color: {color}; background: {bg}; border-bottom: 2px solid {color};'
+                f' color: {color}; background: {bg}; border: 1px solid #ddd;'
                 f' vertical-align: top;">{label}</td>'
             )
-            bullets = "".join(
-                f'<li style="margin-bottom: 4px;">{html.escape(str(item))}</li>'
-                for item in items
-            )
-            cells_body += (
-                f'<td style="width:{pct}%; padding: 6px 8px; vertical-align: top;">'
-                f'<ul style="margin: 0; padding: 0 0 0 14px; font-size: 0.9em;">'
-                f'{bullets}</ul></td>'
-            )
+            coverage_value = col.get("coverage_pct")
+            if coverage_value is not None:
+                body_html = _coverage_cell_html(coverage_value)
+                cells_body += (
+                    f'<td style="width:{pct}%; padding: 6px 8px; vertical-align: top;'
+                    f' border: 1px solid #ddd; text-align: center;">'
+                    f'{body_html}</td>'
+                )
+            else:
+                bullets = "".join(
+                    f'<li style="margin-bottom: 4px;">{html.escape(str(item))}</li>'
+                    for item in items
+                )
+                cells_body += (
+                    f'<td style="width:{pct}%; padding: 6px 8px; vertical-align: top;'
+                    f' border: 1px solid #ddd;">'
+                    f'<ul style="margin: 0; padding: 0 0 0 14px; font-size: 0.9em;">'
+                    f'{bullets}</ul></td>'
+                )
         parts.append(
             f'<table style="width: 100%; border-collapse: collapse;'
-            f' margin-bottom: 8px; table-layout: fixed;">'
+            f' margin-bottom: 8px; table-layout: fixed; border: 1px solid #ddd;">'
             f'<tr>{cells_header}</tr>'
             f'<tr>{cells_body}</tr>'
             f'</table>'
@@ -417,35 +904,70 @@ def _on_grading_done(card_id, evaluation_json):
     """Callback on main thread when grading finishes."""
     global _evaluation_text
 
-    still_on_card = (card_id == _current_card_id)
+    still_on_card = _card_ids_match(card_id)
 
     if not still_on_card:
         _log(f"grading: discarding stale evaluation for card {card_id} "
              f"(current is {_current_card_id})")
         return
 
+    _cancel_grading_watchdog()
+
     # Only persist evaluation if it belongs to the current card
     _evaluation_text = evaluation_json
 
+    expected_rendered = None
     try:
         data = json.loads(evaluation_json)
-        rendered = _render_evaluation_html(data)
-    except (json.JSONDecodeError, ValueError):
+        rendered = _render_evaluation_html(data, mode="question")
+        if isinstance(data, dict):
+            expected_rendered = _render_expected_answer_content(data)
+    except (json.JSONDecodeError, ValueError, TypeError):
         rendered = html.escape(evaluation_json).replace("\n", "<br>")
+
+    if not expected_rendered:
+        expected_rendered = (
+            "<span style='color: #666; font-style: italic;'>"
+            "Answer target unavailable."
+            "</span>"
+        )
 
     if mw.reviewer and mw.reviewer.web:
         # json.dumps produces a valid JS string literal (with quotes)
         js_str = json.dumps(rendered)
+        expected_js_str = json.dumps(expected_rendered)
         js = f"""
         (function() {{
             var el = document.getElementById('variant-evaluation');
             if (el) {{
                 el.innerHTML = {js_str};
+                el.style.display = 'block';
+            }}
+            var hdr = document.getElementById('variant-evaluation-header');
+            if (hdr) {{ hdr.style.display = 'block'; }}
+            var expectedEl = document.getElementById('variant-expected-answer');
+            if (expectedEl) {{
+                expectedEl.innerHTML = {expected_js_str};
+                expectedEl.style.display = 'block';
             }}
         }})();
         """
         _log(f"grading: injecting evaluation ({len(rendered)} chars)")
         mw.reviewer.web.eval(js)
+
+
+def _on_grading_failed(card_id, error_message):
+    # type: (object, str) -> None
+    """Show fallback text when grading fails/times out."""
+    global _evaluation_text
+    still_on_card = _card_ids_match(card_id)
+    if not still_on_card:
+        return
+    _cancel_grading_watchdog()
+    _log(f"grading failed for card {card_id}: {error_message}")
+    _evaluation_text = "Evaluation unavailable (timeout). You can still grade manually."
+    _set_evaluation_message(_evaluation_text)
+    _set_expected_answer_message("Answer target unavailable.")
 
 
 def _start_early_grading():
@@ -473,7 +995,9 @@ def _start_early_grading():
             config=CONFIG,
         )
         _grading_worker.done.connect(_on_grading_done)
+        _grading_worker.failed.connect(_on_grading_failed)
         _grading_worker.start()
+        _start_grading_watchdog(_current_card_id)
     except Exception as e:
         _log(f"early grading failed: {e}")
 
@@ -482,32 +1006,38 @@ def on_answer_shown(card):
     """After answer shown in freeform mode, trigger async grading if not already started."""
     global _grading_worker
 
-    _log(f"on_answer_shown: mode={CONFIG.get('response_mode')}, "
-         f"variant={'yes' if _current_variant else 'no'}, "
-         f"response={len(_user_response)} chars")
+    if CONFIG.get("response_mode") != "freeform" or not _current_variant:
+        return
 
-    if (CONFIG.get("response_mode") == "freeform"
-            and _current_variant
-            and _user_response.strip()):
+    _log(f"on_answer_shown freeform: card={card.id}, response={len(_user_response)} chars")
 
-        # Skip if early grading already started for this card
-        if _grading_worker and _grading_worker.isRunning():
-            _log("grading: already running (early start)")
-            return
+    if not _user_response.strip():
+        global _evaluation_text
+        _evaluation_text = "No response captured. Type or dictate in the box, then press Enter."
+        _cancel_grading_watchdog()
+        _set_evaluation_message(_evaluation_text)
+        return
 
-        _cleanup_grading_worker()
+    # Skip if early grading already started for this card
+    if _grading_worker and _grading_worker.isRunning():
+        _log("grading: already running (early start)")
+        return
 
-        answer_text = _extract_text(card, "answer")
-        _log(f"grading: starting worker for card {card.id}")
-        _grading_worker = _GradingWorker(
-            card_id=card.id,
-            variant_question=_current_variant,
-            user_response=_user_response,
-            canonical_answer=answer_text,
-            config=CONFIG,
-        )
-        _grading_worker.done.connect(_on_grading_done)
-        _grading_worker.start()
+    _cleanup_grading_worker()
+
+    answer_text = _extract_text(card, "answer")
+    _log(f"grading: starting worker for card {card.id}")
+    _grading_worker = _GradingWorker(
+        card_id=card.id,
+        variant_question=_current_variant,
+        user_response=_user_response,
+        canonical_answer=answer_text,
+        config=CONFIG,
+    )
+    _grading_worker.done.connect(_on_grading_done)
+    _grading_worker.failed.connect(_on_grading_failed)
+    _grading_worker.start()
+    _start_grading_watchdog(card.id)
 
 
 # ---------------------------------------------------------------------------
@@ -524,15 +1054,33 @@ def on_js_message(handled: tuple, message: str, context):
 
     if message.startswith("variantFeedback:"):
         try:
-            rating = int(message[len("variantFeedback:"):])
-            if _current_variant_id and _cache:
-                _cache.record_feedback(_current_variant_id, rating)
+            payload = message[len("variantFeedback:"):]
+            parts = payload.split(":")
+            if len(parts) >= 2:
+                variant_id = int(parts[0])
+                rating = int(parts[1])
+            else:
+                # Backward compatibility with older in-flight HTML.
+                variant_id = _current_variant_id
+                rating = int(payload)
+            if variant_id and _cache:
+                _cache.record_feedback(variant_id, rating)
         except Exception:
             pass
         return (True, None)
 
-    if message == "saveCardIdea":
-        _save_current_idea()
+    if message.startswith("saveCardIdea"):
+        card_id = None
+        variant_id = None
+        if ":" in message:
+            try:
+                _, card_s, variant_s = message.split(":", 2)
+                card_id = int(card_s)
+                variant_id = int(variant_s)
+            except Exception:
+                card_id = None
+                variant_id = None
+        _save_current_idea(card_id=card_id, variant_id=variant_id)
         return (True, None)
 
     if message == "startGrading":
@@ -702,6 +1250,51 @@ def _cancel_batch_prefetch():
 # HTML helpers
 # ---------------------------------------------------------------------------
 
+def _answer_side_freeform_html() -> str:
+    """Reconstruct the question-page content (variant, response, evaluation) for the answer side."""
+    parts = []
+
+    # Variant question
+    parts.append(_wrap_variant_html(_current_variant))
+
+    # User's response (static display)
+    response = html.escape(str(_user_response or "").strip())
+    if response:
+        parts.append(
+            '<div style="margin-top: 8px; padding: 12px;'
+            ' border-top: 1px solid #ddd;">'
+            '<div style="font-size: 0.85em; color: #666; margin-bottom: 6px;">'
+            'Your response:</div>'
+            '<div style="padding: 8px; background: #fafafa;'
+            ' border: 1px solid #e0e0e0; border-radius: 4px;'
+            ' font-size: 1em; color: #333;">'
+            + response + '</div></div>'
+        )
+
+    # AI answer target
+    expected_rendered = _render_saved_expected_answer()
+    if expected_rendered:
+        parts.append(
+            '<div style="margin-top: 12px; padding: 10px 12px;'
+            ' background: #f8f9fa; border: 1px solid #dcdfe3;'
+            ' border-radius: 6px; font-size: 0.9em; line-height: 1.45;">'
+            + expected_rendered + '</div>'
+        )
+
+    # Evaluation table (question-side perspective)
+    eval_rendered = _render_saved_evaluation(mode="question")
+    if eval_rendered:
+        parts.append(
+            '<div style="margin-top: 8px; margin-bottom: 8px;'
+            ' padding: 12px 14px; background: #f8f9fa;'
+            ' border: 1px solid #e0e0e0; border-radius: 6px;'
+            ' font-size: 0.9em; line-height: 1.5;">'
+            + eval_rendered + '</div>'
+        )
+
+    return "".join(parts)
+
+
 def _wrap_variant_html(variant: str) -> str:
     """Wrap variant question in styled HTML."""
     safe_variant = html.escape(variant)
@@ -721,7 +1314,7 @@ def _wrap_variant_html(variant: str) -> str:
     """
 
 
-def _feedback_buttons_html() -> str:
+def _feedback_buttons_html(card_id: int, variant_id: int) -> str:
     """Thumbs up/down buttons for rating variant quality, plus bookmark."""
     return """
     <div class="variant-feedback" style="
@@ -735,7 +1328,7 @@ def _feedback_buttons_html() -> str:
         <span id="vf-label">Good variant?</span>
         <button id="vf-up" onclick="
             try {
-                pycmd('variantFeedback:1');
+                pycmd('variantFeedback:%d:1');
                 document.getElementById('vf-up').style.opacity='1';
                 document.getElementById('vf-down').style.opacity='0.3';
                 document.getElementById('vf-label').textContent='Saved';
@@ -746,7 +1339,7 @@ def _feedback_buttons_html() -> str:
         " title="Good variant">&#128077;</button>
         <button id="vf-down" onclick="
             try {
-                pycmd('variantFeedback:-1');
+                pycmd('variantFeedback:%d:-1');
                 document.getElementById('vf-down').style.opacity='1';
                 document.getElementById('vf-up').style.opacity='0.3';
                 document.getElementById('vf-label').textContent='Saved';
@@ -758,7 +1351,7 @@ def _feedback_buttons_html() -> str:
         <span style="border-left: 1px solid #ccc; height: 1.2em; margin: 0 4px;"></span>
         <button id="vf-save" onclick="
             try {
-                pycmd('saveCardIdea');
+                pycmd('saveCardIdea:%d:%d');
                 var btn = document.getElementById('vf-save');
                 btn.textContent = '\\u2713';
                 btn.disabled = true;
@@ -769,12 +1362,11 @@ def _feedback_buttons_html() -> str:
             font-size: 1.3em; opacity: 0.5; padding: 2px 6px;
         " title="Save card idea">&#128278;</button>
     </div>
-    """
+    """ % (int(variant_id), int(variant_id), int(card_id), int(variant_id))
 
 
 def _freeform_input_html() -> str:
-    """HTML for the freeform text response area."""
-    delay = CONFIG.get("submit_delay_ms", 750)
+    """HTML for the freeform text response area with inline grading placeholders."""
     return (
         '<div id="variant-response-area" style="'
         'margin-top: 20px; padding: 12px; border-top: 1px solid #ddd;">'
@@ -792,9 +1384,26 @@ def _freeform_input_html() -> str:
         """ pycmd('variantResponse:' + this.value);"""
         """ pycmd('startGrading');"""
         " this.disabled = true; this.style.opacity = '0.5';"
-        """ setTimeout(function() { pycmd('ans'); }, """ + str(delay) + """);}"""
-        '"'
+        '}"'
         '></textarea></div>'
+        # Placeholders for inline grading results (filled by JS when ready)
+        '<div id="variant-expected-answer" style="display: none;'
+        ' margin-top: 12px; padding: 10px 12px; background: #f8f9fa;'
+        ' border: 1px solid #dcdfe3; border-radius: 6px;'
+        ' font-size: 0.9em; line-height: 1.45;"></div>'
+        + (
+            '<div id="variant-evaluation-header" style="display: none;'
+            ' margin-top: 12px; margin-bottom: 4px; font-size: 0.84em;'
+            ' color: #666;"><b>Feedback w.r.t. AI answer</b></div>'
+            if CONFIG.get("feedback_mode", "both") != "canonical" else
+            '<div id="variant-evaluation-header" style="display: none;'
+            ' margin-top: 12px; margin-bottom: 4px; font-size: 0.84em;'
+            ' color: #666;"><b>Feedback w.r.t. canonical content</b></div>'
+        ) +
+        '<div id="variant-evaluation" style="display: none;'
+        ' margin-bottom: 8px; padding: 12px 14px;'
+        ' background: #f8f9fa; border: 1px solid #e0e0e0;'
+        ' border-radius: 6px; font-size: 0.9em; line-height: 1.5;"></div>'
         '<script>'
         '(function() {'
         ' if (window._proteusPollingId) { clearInterval(window._proteusPollingId); }'
@@ -813,7 +1422,10 @@ def _freeform_input_html() -> str:
 
 
 def _evaluation_html() -> str:
-    """Placeholder HTML for the LLM evaluation (populated via JS after grading)."""
+    """Evaluation box HTML, using saved evaluation when already available."""
+    rendered = _render_saved_evaluation()
+    if not rendered:
+        rendered = '<span style="color: #888;">&#9203; Evaluating your response...</span>'
     return """
     <div id="variant-evaluation" style="
         margin-bottom: 16px;
@@ -824,9 +1436,64 @@ def _evaluation_html() -> str:
         font-size: 0.9em;
         line-height: 1.5;
     ">
-        <span style="color: #888;">&#9203; Evaluating your response...</span>
+        {rendered}
     </div>
-    """
+    """.format(rendered=rendered)
+
+
+def _answer_summary_table_html() -> str:
+    """Three-column table: variant Q, user response, AI answer target (bold)."""
+    variant_q = html.escape(str(_current_variant or ""))
+    response = html.escape(str(_user_response or "").strip())
+
+    expected_rendered = _render_saved_expected_answer()
+    if not expected_rendered:
+        expected_rendered = '<span style="color: #888;">&#9203; Generating answer target...</span>'
+
+    hdr = "padding: 6px 8px; font-weight: bold; border: 1px solid #ddd; vertical-align: top;"
+    cell = "padding: 6px 8px; vertical-align: top; border: 1px solid #ddd; font-size: 0.9em;"
+
+    return (
+        '<table style="width: 100%; border-collapse: collapse;'
+        ' margin-bottom: 8px; table-layout: fixed; border: 1px solid #ddd;">'
+        '<tr>'
+        f'<td style="{hdr} color: #5f6368; background: #f2f3f5;">Variant Q</td>'
+        f'<td style="{hdr} color: #5f6368; background: #f2f3f5;">Your answer</td>'
+        f'<td style="{hdr} color: #5f6368; background: #f2f3f5;">AI answer target</td>'
+        '</tr>'
+        '<tr>'
+        f'<td style="{cell}">{variant_q}</td>'
+        f'<td style="{cell}">{response}</td>'
+        f'<td id="variant-expected-answer" style="{cell} font-weight: bold;">'
+        f'{expected_rendered}</td>'
+        '</tr>'
+        '</table>'
+    )
+
+
+def _variant_peek_html() -> str:
+    """Hidden answer-side panel that can re-show the variant prompt on demand."""
+    variant = html.escape(str(_current_variant or ""))
+    response = html.escape(str(_user_response or "").strip())
+    response_html = ""
+    if response:
+        response_html = (
+            "<div style='margin-top: 8px; color: #666; font-size: 0.85em;'>"
+            "<b>Your response:</b> "
+            + response
+            + "</div>"
+        )
+    return (
+        '<div id="proteus-variant-peek" style="display: none; margin-top: 12px;'
+        ' margin-bottom: 8px; padding: 10px 12px; background: #fafafa;'
+        ' border: 1px solid #e6e6e6; border-radius: 6px; font-size: 0.9em; line-height: 1.5;">'
+        "<div style='color: #666; font-size: 0.85em; margin-bottom: 6px;'>"
+        "<b>Variant prompt (peek)</b>"
+        "</div>"
+        "<div>" + variant + "</div>"
+        + response_html +
+        "</div>"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -851,35 +1518,200 @@ def _extract_text(card, side: str) -> str:
 # Card ideas
 # ---------------------------------------------------------------------------
 
-def _save_current_idea():
-    """Save the current variant as a card idea."""
+_IDEA_REASON_TAGS = [
+    ("", "No tag"),
+    ("unclear", "Unclear"),
+    ("too_easy", "Too easy"),
+    ("too_hard", "Too hard"),
+    ("awkward_wording", "Awkward wording"),
+    ("duplicate_concept", "Duplicate concept"),
+    ("promising_direction", "Promising direction"),
+]
+
+
+def _idea_working_text(idea):
+    # type: (dict) -> str
+    """Return edited draft if present, otherwise the original generated variant."""
+    edited = idea.get("edited_variant_text")
+    if edited and edited.strip():
+        return edited.strip()
+    return str(idea.get("variant_text", "")).strip()
+
+
+def _idea_working_answer(idea):
+    # type: (dict) -> str
+    """Return edited answer draft if present, otherwise the original answer."""
+    edited = idea.get("edited_answer_text")
+    if edited and edited.strip():
+        return edited.strip()
+    return str(idea.get("original_answer", "")).strip()
+
+
+def _card_shape_guardrail_issues(question_text, answer_text):
+    # type: (str, str) -> list
+    """Return blocking issues for non-atomic card shapes."""
+    import re
+
+    question = str(question_text or "").strip()
+    answer = str(answer_text or "").strip()
+    issues = []
+
+    if question.count("?") > 1:
+        issues.append("question has multiple asks (more than one '?').")
+
+    # Catch patterns like "What ... and what ..." that usually encode two prompts.
+    if re.search(r"\b(and|or)\s+(what|which|why|how|when|where|who)\b", question.lower()):
+        issues.append("question appears to chain multiple prompts.")
+
+    answer_lines = [ln.strip() for ln in answer.splitlines() if ln.strip()]
+    if len(answer_lines) >= 3:
+        issues.append("answer spans several lines and likely contains multiple facts.")
+
+    answer_parts = [p.strip() for p in re.split(r"[;,]", answer) if p.strip()]
+    if len(answer_parts) >= 4 and len(answer.split()) > 18:
+        issues.append("answer looks like a list; split into separate cards.")
+
+    if len(answer.split()) > 45:
+        issues.append("answer is too long for a focused recall target.")
+
+    return issues
+
+
+def _regenerate_idea_variant(idea, instruction, current_text):
+    # type: (dict, str, Optional[str]) -> Optional[str]
+    """Regenerate a variant with an explicit human instruction."""
+    if not CONFIG.get("api_key"):
+        return None
+
+    cfg = dict(CONFIG)
+    base = cfg.get("system_prompt", "").strip()
+    extra_parts = [
+        "Human editing request for this single rewrite:",
+        instruction,
+    ]
+    if current_text:
+        extra_parts.extend([
+            "",
+            "Current draft variant:",
+            current_text.strip()[:500],
+        ])
+    extra_parts.extend([
+        "",
+        "Keep the same underlying concept and answer target.",
+        "Return only the rewritten question text.",
+    ])
+    extra = "\n".join(extra_parts)
+    cfg["system_prompt"] = f"{base}\n\n{extra}" if base else extra
+
+    return generate_variant(
+        question=str(idea.get("original_question", "")),
+        answer=str(idea.get("original_answer", "")),
+        config=cfg,
+    )
+
+
+class _IdeaRegenerateWorker(QThread):
+    """Background worker for directed idea regeneration in the card ideas dialog."""
+    done = pyqtSignal(int, str)    # idea_id, regenerated_text
+    failed = pyqtSignal(int, str)  # idea_id, error_message
+
+    def __init__(self, idea_id, idea, instruction, current_text):
+        # type: (int, dict, str, str) -> None
+        super().__init__()
+        self._idea_id = idea_id
+        self._idea = dict(idea)
+        self._instruction = instruction
+        self._current_text = current_text
+
+    def run(self):
+        try:
+            regenerated = _regenerate_idea_variant(
+                self._idea,
+                self._instruction,
+                self._current_text,
+            )
+            if regenerated:
+                self.done.emit(self._idea_id, regenerated)
+            else:
+                self.failed.emit(self._idea_id, "empty regeneration result")
+        except Exception as e:
+            self.failed.emit(self._idea_id, str(e))
+
+
+def _decision_label(status):
+    # type: (str) -> str
+    labels = {
+        "pending": "Pending",
+        "edited_pending": "Edited (pending)",
+        "accepted": "Accepted",
+        "edited_accepted": "Edited + accepted",
+        "rejected": "Rejected",
+    }
+    return labels.get(status, status.replace("_", " ").title())
+
+
+def _selected_reason(combo):
+    # type: (object) -> Optional[str]
+    reason = combo.currentData()
+    if not reason:
+        return None
+    return str(reason)
+
+
+def _idea_has_feedback(idea):
+    # type: (dict) -> bool
+    """True only when an idea includes non-empty grading feedback."""
+    evaluation = idea.get("evaluation")
+    if evaluation is None:
+        return False
+    return bool(str(evaluation).strip())
+
+
+def _save_current_idea(card_id=None, variant_id=None):
+    # type: (Optional[int], Optional[int]) -> None
+    """Save the current (or explicitly identified) variant as a card idea."""
     global _ideas_saved_this_session
     try:
-        if not _current_variant or _current_card_id is None or not _cache:
+        if not _cache:
             return
 
-        card = mw.col.get_card(_current_card_id)
+        target_card_id = card_id if card_id is not None else _current_card_id
+        target_variant_id = variant_id if variant_id is not None else _current_variant_id
+        variant_text = _current_variant
+        rating = None
+
+        if target_variant_id is not None:
+            with _cache._lock:
+                row = _cache._conn.execute(
+                    "SELECT card_id, variant_text, rating FROM variants WHERE id = ?",
+                    (target_variant_id,),
+                ).fetchone()
+                if row:
+                    db_card_id, db_variant_text, db_rating = row
+                    target_card_id = int(db_card_id)
+                    variant_text = str(db_variant_text or "")
+                    rating = db_rating
+
+        if not variant_text or target_card_id is None:
+            return
+
+        card = mw.col.get_card(int(target_card_id))
+        if not card:
+            return
         orig_q = _extract_text(card, "question")
         orig_a = _extract_text(card, "answer")
 
-        # Read current rating from variants table if available
-        rating = None
-        if _current_variant_id is not None:
-            with _cache._lock:
-                row = _cache._conn.execute(
-                    "SELECT rating FROM variants WHERE id = ?",
-                    (_current_variant_id,),
-                ).fetchone()
-                if row:
-                    rating = row[0]
+        evaluation = None
+        if _current_card_id == target_card_id:
+            evaluation = _evaluation_text
 
         _cache.save_idea(
-            card_id=_current_card_id,
-            variant_text=_current_variant,
+            card_id=target_card_id,
+            variant_text=variant_text,
             original_question=orig_q,
             original_answer=orig_a,
             rating=rating,
-            evaluation=_evaluation_text,
+            evaluation=evaluation,
         )
         _ideas_saved_this_session += 1
         tooltip("Card idea saved")
@@ -893,6 +1725,7 @@ def show_card_ideas_dialog():
         from aqt.qt import (
             QDialog, QVBoxLayout, QHBoxLayout, QLabel,
             QPushButton, QScrollArea, QWidget, QFrame,
+            QComboBox, QPlainTextEdit,
         )
 
         if not _cache:
@@ -922,6 +1755,7 @@ def show_card_ideas_dialog():
         outer.addWidget(close_btn)
 
         dlg.setLayout(outer)
+        regen_workers = []  # type: list
 
         def refresh():
             # Clear existing widgets
@@ -947,9 +1781,60 @@ def show_card_ideas_dialog():
                 frame.setStyleSheet("QFrame { margin-bottom: 6px; padding: 8px; }")
                 fl = QVBoxLayout()
 
-                variant_lbl = QLabel(f"<b>{html.escape(idea['variant_text'])}</b>")
-                variant_lbl.setWordWrap(True)
-                fl.addWidget(variant_lbl)
+                raw_variant = str(idea.get("variant_text", ""))
+                working_variant = _idea_working_text(idea)
+                original_answer = str(idea.get("original_answer", ""))
+                working_answer = _idea_working_answer(idea)
+                decision_status = str(idea.get("decision_status", "pending"))
+                decision_reason = idea.get("decision_reason")
+                has_feedback = _idea_has_feedback(idea)
+
+                status_lbl = QLabel(
+                    f"<span style='color: #555;'><b>Status:</b> "
+                    f"{html.escape(_decision_label(decision_status))}</span>"
+                )
+                status_lbl.setWordWrap(True)
+                fl.addWidget(status_lbl)
+
+                raw_lbl = QLabel(
+                    f"<span style='color: #666;'><b>Original variant:</b> "
+                    f"{html.escape(raw_variant[:260])}</span>"
+                )
+                raw_lbl.setWordWrap(True)
+                fl.addWidget(raw_lbl)
+
+                draft_lbl = QLabel("<span style='color: #444;'><b>Working draft (editable)</b></span>")
+                draft_lbl.setWordWrap(True)
+                fl.addWidget(draft_lbl)
+
+                draft_edit = QPlainTextEdit()
+                draft_edit.setPlainText(working_variant)
+                draft_edit.setMinimumHeight(72)
+                fl.addWidget(draft_edit)
+
+                regen_row = QHBoxLayout()
+                short_btn = QPushButton("Shorter")
+                concrete_btn = QPushButton("More Concrete")
+                jargon_btn = QPushButton("Less Jargon")
+                contrast_btn = QPushButton("Add Contrast Case")
+                regen_row.addWidget(short_btn)
+                regen_row.addWidget(concrete_btn)
+                regen_row.addWidget(jargon_btn)
+                regen_row.addWidget(contrast_btn)
+                fl.addLayout(regen_row)
+                regen_buttons = [short_btn, concrete_btn, jargon_btn, contrast_btn]
+
+                tag_row = QHBoxLayout()
+                tag_row.addWidget(QLabel("Tag:"))
+                reason_combo = QComboBox()
+                for key, label in _IDEA_REASON_TAGS:
+                    reason_combo.addItem(label, key)
+                if decision_reason:
+                    idx = reason_combo.findData(decision_reason)
+                    if idx >= 0:
+                        reason_combo.setCurrentIndex(idx)
+                tag_row.addWidget(reason_combo)
+                fl.addLayout(tag_row)
 
                 orig_q_lbl = QLabel(
                     f"<span style='color: #888;'>Q: {html.escape(idea['original_question'][:200])}</span>"
@@ -958,10 +1843,26 @@ def show_card_ideas_dialog():
                 fl.addWidget(orig_q_lbl)
 
                 orig_a_lbl = QLabel(
-                    f"<span style='color: #888;'>A: {html.escape(idea['original_answer'][:200])}</span>"
+                    f"<span style='color: #888;'>Original A: {html.escape(original_answer[:200])}</span>"
                 )
                 orig_a_lbl.setWordWrap(True)
                 fl.addWidget(orig_a_lbl)
+
+                answer_draft_lbl = QLabel(
+                    "<span style='color: #444;'><b>Answer draft (editable)</b></span>"
+                )
+                answer_draft_lbl.setWordWrap(True)
+                fl.addWidget(answer_draft_lbl)
+
+                answer_edit = QPlainTextEdit()
+                answer_edit.setPlainText(working_answer)
+                answer_edit.setMinimumHeight(64)
+                fl.addWidget(answer_edit)
+
+                answer_btn_row = QHBoxLayout()
+                answer_reset_btn = QPushButton("Reset Answer")
+                answer_btn_row.addWidget(answer_reset_btn)
+                fl.addLayout(answer_btn_row)
 
                 if idea['rating'] is not None:
                     badge = "\U0001f44d" if idea['rating'] > 0 else "\U0001f44e"
@@ -972,13 +1873,18 @@ def show_card_ideas_dialog():
                 if eval_json:
                     try:
                         eval_data = json.loads(eval_json)
-                        overall = eval_data.get('overall', '')
-                        score = eval_data.get('score', 0)
+                        overall = str(eval_data.get('overall', '')).strip()
+                        alignment = str(eval_data.get("alignment", "aligned")).strip().lower()
+                        if alignment not in ("aligned", "partial", "misaligned"):
+                            alignment = "aligned"
+                        coverage_pct = eval_data.get("coverage_pct")
                         eval_parts = []
                         if overall:
                             eval_parts.append(html.escape(overall))
-                        if score >= 1:
-                            eval_parts.append(f"{score}/5")
+                        if alignment == "misaligned":
+                            eval_parts.append("drifted")
+                        elif coverage_pct is not None:
+                            eval_parts.append(f"{coverage_pct}% coverage")
                         if eval_parts:
                             eval_lbl = QLabel(
                                 f"<span style='color: #555; font-style: italic;'>"
@@ -990,26 +1896,217 @@ def show_card_ideas_dialog():
                         pass
 
                 btn_row = QHBoxLayout()
+                save_btn = QPushButton("Save Edit")
                 create_btn = QPushButton("Create Card")
-                dismiss_btn = QPushButton("Dismiss")
+                dismiss_btn = QPushButton("Reject")
+                if not has_feedback:
+                    create_btn.setEnabled(False)
+                    create_btn.setToolTip(
+                        "Requires freeform grading feedback "
+                        "(from Wispr/typed response)."
+                    )
 
                 idea_id = idea['id']
 
-                def make_create(i=idea, iid=idea_id):
+                def make_regen(i=idea, iid=idea_id, editor=draft_edit,
+                               reason=reason_combo, status=status_lbl):
+                    # type: (dict, int, QPlainTextEdit, QComboBox, QLabel) -> object
+                    def set_regen_enabled(enabled):
+                        # type: (bool) -> None
+                        for btn in regen_buttons:
+                            btn.setEnabled(enabled)
+
+                    def on_click(instruction):
+                        current = editor.toPlainText().strip()
+                        if not current:
+                            tooltip("Proteus: draft cannot be empty")
+                            return
+                        set_regen_enabled(False)
+                        status.setText(
+                            "<span style='color: #555;'><b>Status:</b> "
+                            "Regenerating...</span>"
+                        )
+                        worker = _IdeaRegenerateWorker(iid, i, instruction, current)
+                        regen_workers.append(worker)
+
+                        def on_done(done_iid, regenerated):
+                            # type: (int, str) -> None
+                            if done_iid != iid:
+                                return
+                            _cache.update_idea_edit(iid, regenerated)
+                            _cache.set_idea_decision(
+                                iid,
+                                "edited_pending",
+                                _selected_reason(reason),
+                                mark_used=False,
+                            )
+                            try:
+                                editor.setPlainText(regenerated)
+                                status.setText(
+                                    "<span style='color: #555;'><b>Status:</b> "
+                                    "Edited (pending)</span>"
+                                )
+                            except RuntimeError:
+                                pass
+                            tooltip("Proteus: regenerated draft saved")
+
+                        def on_failed(failed_iid, msg):
+                            # type: (int, str) -> None
+                            if failed_iid != iid:
+                                return
+                            try:
+                                status.setText(
+                                    "<span style='color: #555;'><b>Status:</b> "
+                                    "Pending</span>"
+                                )
+                            except RuntimeError:
+                                pass
+                            _log(f"idea regeneration failed for {iid}: {msg}")
+                            tooltip("Proteus: regeneration failed")
+
+                        def on_finished():
+                            # type: () -> None
+                            global _idea_orphan_workers
+                            try:
+                                set_regen_enabled(True)
+                            except RuntimeError:
+                                pass
+                            try:
+                                regen_workers.remove(worker)
+                            except ValueError:
+                                pass
+                            try:
+                                _idea_orphan_workers.remove(worker)
+                            except ValueError:
+                                pass
+                            worker.deleteLater()
+
+                        worker.done.connect(on_done)
+                        worker.failed.connect(on_failed)
+                        worker.finished.connect(on_finished)
+                        worker.start()
+                    return on_click
+
+                def make_save(iid=idea_id, editor=draft_edit, reason=reason_combo,
+                              original_text=raw_variant, answer_editor=answer_edit,
+                              original_answer_text=original_answer):
+                    # type: (int, QPlainTextEdit, QComboBox, str, QPlainTextEdit, str) -> object
                     def on_click():
-                        _open_add_note_with_idea(i)
-                        _cache.mark_idea_used(iid)
+                        edited = editor.toPlainText().strip()
+                        edited_answer = answer_editor.toPlainText().strip()
+                        if not edited:
+                            tooltip("Proteus: draft cannot be empty")
+                            return
+                        if not edited_answer:
+                            tooltip("Proteus: answer draft cannot be empty")
+                            return
+                        question_changed = edited != original_text.strip()
+                        answer_changed = edited_answer != original_answer_text.strip()
+                        status = "edited_pending" if (question_changed or answer_changed) else "pending"
+                        _cache.update_idea_edit(iid, edited)
+                        _cache.update_idea_answer_edit(iid, edited_answer)
+                        _cache.set_idea_decision(
+                            iid,
+                            status,
+                            _selected_reason(reason),
+                            mark_used=False,
+                        )
+                        tooltip("Proteus: draft saved")
                         refresh()
                     return on_click
 
-                def make_dismiss(iid=idea_id):
+                def make_create(i=idea, iid=idea_id, editor=draft_edit,
+                                reason=reason_combo, original_text=raw_variant,
+                                answer_editor=answer_edit, original_answer_text=original_answer):
+                    # type: (dict, int, QPlainTextEdit, QComboBox, str, QPlainTextEdit, str) -> object
                     def on_click():
-                        _cache.mark_idea_used(iid)
+                        if not _idea_has_feedback(i):
+                            tooltip("Proteus: Create Card requires freeform feedback first")
+                            return
+                        edited = editor.toPlainText().strip()
+                        edited_answer = answer_editor.toPlainText().strip()
+                        if not edited:
+                            tooltip("Proteus: draft cannot be empty")
+                            return
+                        if not edited_answer:
+                            tooltip("Proteus: answer draft cannot be empty")
+                            return
+                        issues = _card_shape_guardrail_issues(edited, edited_answer)
+                        if issues:
+                            suffix = ""
+                            if len(issues) > 1:
+                                suffix = " (+{} more)".format(len(issues) - 1)
+                            tooltip(
+                                "Proteus: guardrail blocked create: {}{}".format(
+                                    issues[0], suffix
+                                )
+                            )
+                            return
+                        edited_accept = (
+                            edited != original_text.strip()
+                            or edited_answer != original_answer_text.strip()
+                        )
+                        status = "edited_accepted" if edited_accept else "accepted"
+                        _cache.update_idea_edit(iid, edited)
+                        _cache.update_idea_answer_edit(iid, edited_answer)
+                        _cache.set_idea_decision(
+                            iid,
+                            status,
+                            _selected_reason(reason),
+                            mark_used=True,
+                        )
+                        idea_for_create = dict(i)
+                        idea_for_create["variant_text"] = edited
+                        idea_for_create["edited_variant_text"] = edited
+                        idea_for_create["edited_answer_text"] = edited_answer
+                        _open_add_note_with_idea(idea_for_create)
                         refresh()
                     return on_click
 
+                def make_dismiss(iid=idea_id, editor=draft_edit, reason=reason_combo,
+                                 answer_editor=answer_edit):
+                    # type: (int, QPlainTextEdit, QComboBox, QPlainTextEdit) -> object
+                    def on_click():
+                        edited = editor.toPlainText().strip()
+                        edited_answer = answer_editor.toPlainText().strip()
+                        if edited:
+                            _cache.update_idea_edit(iid, edited)
+                        if edited_answer:
+                            _cache.update_idea_answer_edit(iid, edited_answer)
+                        _cache.set_idea_decision(
+                            iid,
+                            "rejected",
+                            _selected_reason(reason),
+                            mark_used=True,
+                        )
+                        refresh()
+                    return on_click
+
+                def make_reset_answer(answer_editor=answer_edit, original_answer_text=original_answer):
+                    # type: (QPlainTextEdit, str) -> object
+                    def on_click():
+                        answer_editor.setPlainText(original_answer_text)
+                    return on_click
+
+                regen_handler = make_regen()
+                short_btn.clicked.connect(lambda _=False, h=regen_handler: h(
+                    "Rewrite this to be shorter and simpler without losing the tested concept."
+                ))
+                concrete_btn.clicked.connect(lambda _=False, h=regen_handler: h(
+                    "Rewrite with a concrete real-world scenario while testing the same idea."
+                ))
+                jargon_btn.clicked.connect(lambda _=False, h=regen_handler: h(
+                    "Rewrite with less jargon and clearer wording at the same difficulty."
+                ))
+                contrast_btn.clicked.connect(lambda _=False, h=regen_handler: h(
+                    "Rewrite by adding a contrast or failure case that still targets the same answer."
+                ))
+
+                save_btn.clicked.connect(make_save())
                 create_btn.clicked.connect(make_create())
                 dismiss_btn.clicked.connect(make_dismiss())
+                answer_reset_btn.clicked.connect(make_reset_answer())
+                btn_row.addWidget(save_btn)
                 btn_row.addWidget(create_btn)
                 btn_row.addWidget(dismiss_btn)
                 fl.addLayout(btn_row)
@@ -1019,6 +2116,31 @@ def show_card_ideas_dialog():
 
             ideas_layout.addStretch()
 
+        def _wait_for_regen_workers(_result=0):
+            # type: (int) -> None
+            global _idea_orphan_workers
+            for worker in list(regen_workers):
+                if worker.isRunning():
+                    worker.wait(5000)
+                if worker.isRunning():
+                    # Keep a reference so a running QThread is not destroyed.
+                    _idea_orphan_workers.append(worker)
+
+                    def _cleanup_orphan(w=worker):
+                        # type: (object) -> None
+                        global _idea_orphan_workers
+                        try:
+                            _idea_orphan_workers.remove(w)
+                        except ValueError:
+                            pass
+                        w.deleteLater()
+
+                    worker.finished.connect(_cleanup_orphan)
+                    continue
+                worker.deleteLater()
+            regen_workers[:] = []
+
+        dlg.finished.connect(_wait_for_regen_workers)
         refresh()
         dlg.exec()
     except Exception as e:
@@ -1028,14 +2150,19 @@ def show_card_ideas_dialog():
 def _open_add_note_with_idea(idea):
     """Open the Add Note dialog pre-filled with an idea's content."""
     try:
+        if not _idea_has_feedback(idea):
+            tooltip("Proteus: cannot create card without freeform feedback")
+            return
         from aqt.addcards import AddCards
 
         add_dlg = AddCards(mw)
         try:
             note = add_dlg.editor.note
             if note and len(note.fields) >= 2:
-                note.fields[0] = idea['variant_text']
-                note.fields[1] = idea['original_answer']
+                front = idea.get('edited_variant_text') or idea.get('variant_text', '')
+                back = idea.get('edited_answer_text') or idea.get('original_answer', '')
+                note.fields[0] = front
+                note.fields[1] = back
                 add_dlg.editor.loadNote()
         except Exception:
             pass  # different note types may have different layouts

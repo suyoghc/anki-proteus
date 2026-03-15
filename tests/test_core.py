@@ -25,7 +25,7 @@ from cache import VariantCache  # noqa: E402
 # against the real source, not a copy.
 _init_source = open(os.path.join(ADDON_DIR, "__init__.py")).read()
 _tree = ast.parse(_init_source)
-_target_funcs = {"_estimate_cost", "_budget_pct", "_budget_bar_text"}
+_target_funcs = {"_estimate_cost", "_budget_pct", "_budget_bar_text", "_idea_has_feedback"}
 _func_nodes = [
     n for n in ast.iter_child_nodes(_tree)
     if isinstance(n, ast.FunctionDef) and n.name in _target_funcs
@@ -37,6 +37,7 @@ exec(compile(_mod, "__init__.py", "exec"), _ns)
 _estimate_cost = _ns["_estimate_cost"]
 _budget_pct = _ns["_budget_pct"]
 _budget_bar_text = _ns["_budget_bar_text"]
+_idea_has_feedback = _ns["_idea_has_feedback"]
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +116,320 @@ class TestUsageTracker:
 
 
 # ===========================================================================
-# 7-12  Variant cache (cache.py)
+# 7-8  Grading config path (generator.py)
+# ===========================================================================
+
+class TestVariantGeneration:
+
+    def test_generate_variant_shortens_overlong_output(self, monkeypatch):
+        """Overlong variants trigger one shorten pass."""
+        calls = []
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            calls.append({"max_tokens": max_tokens, "system": system})
+            if len(calls) == 1:
+                return (
+                    "What type of effects should be used for subject and item in a "
+                    "hierarchical study design where you need to account for "
+                    "correlations within groups and allow parameters to vary across "
+                    "different levels of the data?"
+                )
+            return "Should subject and item be modeled as random effects in this study?"
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.generate_variant(
+            question="Q",
+            answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert len(calls) == 2
+        assert calls[0]["max_tokens"] == 300
+        assert calls[1]["max_tokens"] == 120
+        assert out == "Should subject and item be modeled as random effects in this study?"
+        assert len(out.split()) <= generator._MAX_VARIANT_WORDS
+
+    def test_generate_variant_hard_caps_when_shorten_fails(self, monkeypatch):
+        """If shorten pass fails, variant is hard-capped to limits."""
+        calls = []
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            calls.append(max_tokens)
+            if len(calls) == 1:
+                return (
+                    "In this hierarchical design with repeated observations from many "
+                    "subjects and items across several contextual groupings, what type "
+                    "of effects should be used for subject and item if we need to "
+                    "capture within-group correlations while allowing parameters to vary?"
+                )
+            return None
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.generate_variant(
+            question="Q",
+            answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert calls == [300, 120]
+        assert out is not None
+        assert len(out.split()) <= generator._MAX_VARIANT_WORDS
+        assert len(out) <= generator._MAX_VARIANT_CHARS
+        assert out.endswith("?")
+
+
+# ===========================================================================
+# 7-8  Grading config path (generator.py)
+# ===========================================================================
+
+class TestGradingConfig:
+
+    def test_grade_response_uses_fast_defaults(self, monkeypatch):
+        """grade_response should call API with grading defaults."""
+        captured = {}
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            captured["api_key"] = api_key
+            captured["model"] = model
+            captured["max_tokens"] = max_tokens
+            captured["timeout_s"] = timeout_s
+            return '{"correct":[],"incorrect":[],"missed":[],"overall":"ok","score":3}'
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert captured["api_key"] == "k"
+        assert captured["model"] == "m"
+        assert captured["max_tokens"] == 280
+        assert captured["timeout_s"] == 10
+        assert out["score"] == 3
+
+    def test_grade_response_honors_overrides(self, monkeypatch):
+        """grading_model/max_tokens/timeout overrides should be passed through."""
+        captured = {}
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            captured["model"] = model
+            captured["max_tokens"] = max_tokens
+            captured["timeout_s"] = timeout_s
+            return '{"correct":[],"incorrect":[],"missed":[],"overall":"ok","score":4}'
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={
+                "api_key": "k",
+                "model": "slow-model",
+                "grading_model": "fast-model",
+                "grading_max_tokens": 120,
+                "grading_timeout_s": 6,
+            },
+        )
+
+        assert captured["model"] == "fast-model"
+        assert captured["max_tokens"] == 120
+        assert captured["timeout_s"] == 6
+        assert out["score"] == 4
+
+    def test_grade_response_falls_back_to_base_model(self, monkeypatch):
+        """If grading override fails, grade_response retries once on base model."""
+        calls = []
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            calls.append((model, max_tokens, timeout_s))
+            if model == "bad-fast-model":
+                return None
+            return '{"correct":[],"incorrect":[],"missed":[],"overall":"ok","score":5}'
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={
+                "api_key": "k",
+                "model": "base-model",
+                "grading_model": "bad-fast-model",
+                "grading_max_tokens": 120,
+                "grading_timeout_s": 10,
+            },
+        )
+
+        assert calls[0][0] == "bad-fast-model"
+        assert calls[1][0] == "base-model"
+        assert calls[1][2] == 10  # fallback uses a slightly higher timeout floor
+        assert out["score"] == 5
+
+    def test_grade_response_misaligned_zeroes_correctness(self, monkeypatch):
+        """Misaligned variants should not return correctness verdict fields."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return json.dumps({
+                "alignment": "misaligned",
+                "alignment_note": "target drift",
+                "learning_feedback": ["Good related intuition."],
+                "correct": ["point A"],
+                "incorrect": ["point B"],
+                "missed": ["point C"],
+                "overall": "Not directly comparable.",
+                "score": 5,
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["alignment"] == "misaligned"
+        assert out["score"] == 0
+        assert out["correct"] == []
+        assert out["incorrect"] == []
+        assert out["missed"] == []
+        assert out["learning_feedback"] == ["Good related intuition."]
+        assert out["coverage_pct"] == 0
+        assert out["question_gap_points"] == ["point C"]
+
+    def test_grade_response_computes_coverage_pct(self, monkeypatch):
+        """Coverage is derived from covered/missed canonical points when omitted."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return json.dumps({
+                "alignment": "aligned",
+                "alignment_note": "",
+                "canonical_points": ["A", "B", "C"],
+                "covered_points": ["A", "B"],
+                "missed_points": ["C"],
+                "incorrect": [],
+                "learning_feedback": [],
+                "overall": "Solid response.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["coverage_pct"] == 67
+        assert out["covered_points"] == ["A", "B"]
+        assert out["missed_points"] == ["C"]
+        assert out["correct"] == ["A", "B"]
+        assert out["question_gap_points"] == ["C"]
+
+    def test_grade_response_derives_missing_gap_points_from_canonical(self, monkeypatch):
+        """If missed/question gaps are absent, derive them from canonical-covered diff."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return json.dumps({
+                "alignment": "partial",
+                "canonical_points": ["A", "B", "C"],
+                "covered_points": ["A"],
+                "coverage_pct": 33,
+                "overall": "Partial.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["coverage_pct"] == 33
+        assert out["missed_points"] == ["B", "C"]
+        assert out["question_gap_points"] == ["B", "C"]
+
+    def test_grade_response_ignores_inconsistent_raw_coverage_when_points_exist(self, monkeypatch):
+        """Coverage percent is computed from points when those points are available."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return json.dumps({
+                "alignment": "aligned",
+                "canonical_points": ["A", "B", "C"],
+                "covered_points": ["A", "B", "C"],
+                "coverage_pct": 33,
+                "overall": "Complete.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["coverage_pct"] == 100
+
+    def test_grade_response_salvages_truncated_json(self, monkeypatch):
+        """Truncated JSON should still return structured alignment/related feedback."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return (
+                '{"alignment":"partial","alignment_note":"target overlap but incomplete",'
+                '"learning_feedback":["Good intuition about dependencies","Generalization caveat"'
+            )
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["alignment"] == "partial"
+        assert out["alignment_note"] == "target overlap but incomplete"
+        assert out["learning_feedback"] == [
+            "Good intuition about dependencies",
+            "Generalization caveat",
+        ]
+        assert not out["overall"].startswith("{")
+
+    def test_grade_response_invalid_json_uses_clean_fallback(self, monkeypatch):
+        """Totally invalid JSON should not leak raw payload into overall."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return "<<<bad-output>>>"
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["overall"] == "Evaluation unavailable."
+        assert out["score"] == 0
+
+
+# ===========================================================================
+# 9-14  Variant cache (cache.py)
 # ===========================================================================
 
 class TestVariantCache:
@@ -257,7 +571,22 @@ class TestCostBudget:
 
 
 # ===========================================================================
-# 16-22  Card ideas (cache.py)
+# 16  Feedback gate helper (__init__.py)
+# ===========================================================================
+
+class TestIdeaFeedbackGate:
+
+    def test_idea_has_feedback(self):
+        """Create-card gate requires non-empty evaluation text."""
+        assert not _idea_has_feedback({"evaluation": None})
+        assert not _idea_has_feedback({"evaluation": ""})
+        assert not _idea_has_feedback({"evaluation": "   "})
+        assert _idea_has_feedback({"evaluation": '{"overall":"ok","score":3}'})
+        assert _idea_has_feedback({"evaluation": "fallback text"})
+
+
+# ===========================================================================
+# 17-23  Card ideas (cache.py)
 # ===========================================================================
 
 class TestCardIdeas:
@@ -288,6 +617,9 @@ class TestCardIdeas:
         assert idea["original_answer"] == "Paris"
         assert idea["rating"] == 1
         assert idea["used"] == 0
+        assert idea["edited_variant_text"] is None
+        assert idea["decision_status"] == "pending"
+        assert idea["decision_reason"] is None
 
     def test_mark_idea_used(self, cache):
         """Mark idea used -> excluded from default get_ideas, included with flag."""
@@ -318,6 +650,28 @@ class TestCardIdeas:
         idea_id = cache.save_idea(1, "V", "Q", "A")
         ideas = cache.get_ideas()
         assert ideas[0]["rating"] is None
+
+    def test_update_idea_edit(self, cache):
+        """Human-edited idea text is persisted and retrievable."""
+        idea_id = cache.save_idea(1, "Original", "Q", "A")
+        cache.update_idea_edit(idea_id, "Edited by human")
+        idea = cache.get_ideas(include_used=True)[0]
+        assert idea["edited_variant_text"] == "Edited by human"
+
+    def test_set_idea_decision(self, cache):
+        """Decision status/reason saved, optionally marking idea used."""
+        idea_id = cache.save_idea(1, "V", "Q", "A")
+        cache.set_idea_decision(idea_id, "edited_accepted", "awkward_wording")
+        idea = cache.get_ideas(include_used=True)[0]
+        assert idea["decision_status"] == "edited_accepted"
+        assert idea["decision_reason"] == "awkward_wording"
+        assert idea["used"] == 0
+
+        cache.set_idea_decision(idea_id, "rejected", "too_easy", mark_used=True)
+        idea = cache.get_ideas(include_used=True)[0]
+        assert idea["decision_status"] == "rejected"
+        assert idea["decision_reason"] == "too_easy"
+        assert idea["used"] == 1
 
     def test_ideas_ordered_by_created_at_desc(self, cache):
         """Most recent idea appears first."""

@@ -1,4 +1,5 @@
 {
+    "enabled": true,
     "api_key": "",
     "model": "claude-sonnet-4-20250514",
     "response_mode": "flip",
@@ -13,5 +14,9 @@
     "show_prefetch_progress": true,
     "debug_logging": false,
     "usage_budget": 5.00,
-    "submit_delay_ms": 750
+    "submit_delay_ms": 750,
+    "grading_model": "",
+    "grading_max_tokens": 280,
+    "grading_timeout_s": 10,
+    "feedback_mode": "both"
 }
