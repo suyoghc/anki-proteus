@@ -16,6 +16,6 @@
     "usage_budget": 5.00,
     "submit_delay_ms": 750,
     "grading_model": "",
-    "grading_max_tokens": 120,
+    "grading_max_tokens": 280,
     "grading_timeout_s": 10
 }

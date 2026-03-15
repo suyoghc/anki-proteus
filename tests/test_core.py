@@ -208,7 +208,7 @@ class TestGradingConfig:
 
         assert captured["api_key"] == "k"
         assert captured["model"] == "m"
-        assert captured["max_tokens"] == 120
+        assert captured["max_tokens"] == 280
         assert captured["timeout_s"] == 10
         assert out["score"] == 3
 

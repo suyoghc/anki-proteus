@@ -130,7 +130,7 @@ Edit via **Tools → Add-ons → Config** or directly in `config.json`:
     "usage_budget": 5.00,
     "submit_delay_ms": 750,
     "grading_model": "",
-    "grading_max_tokens": 120,
+    "grading_max_tokens": 280,
     "grading_timeout_s": 10
 }
 ```
@@ -168,7 +168,7 @@ clinical vignettes and patient presentations."
 
 **`grading_model`**: Optional model override used only for grading. Leave empty to use `model`. If you have access to a faster model, set it here.
 
-**`grading_max_tokens`**: Max output tokens for grading response. Lower is usually faster. Default: 120.
+**`grading_max_tokens`**: Max output tokens for grading response. Default: 280 (sized for the full grading schema).
 
 **`grading_timeout_s`**: Fail-fast timeout for grading requests. If exceeded, the UI shows a fallback message so it doesn't stay on "Evaluating...". Default: 10.
 

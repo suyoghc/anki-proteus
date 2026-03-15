@@ -62,7 +62,7 @@ def load_config():
         "usage_budget": 5.00,              # monthly budget in USD (for progress bar)
         "submit_delay_ms": 750,            # ms delay after Enter before flipping to answer
         "grading_model": "",               # optional override for grading model
-        "grading_max_tokens": 120,         # smaller grading response for speed
+        "grading_max_tokens": 280,         # room for full grading schema
         "grading_timeout_s": 10,           # fail fast if grading is slow
     }
     conf = mw.addonManager.getConfig(__name__)
@@ -352,14 +352,22 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             if _current_variant and _current_variant_id is not None:
                 extra = ""
                 expected = ""
+                separator = ""
                 peek_panel = _variant_peek_html()
                 if CONFIG.get("response_mode") == "freeform" and _user_response.strip():
-                    expected = _expected_answer_html()
+                    expected = _answer_summary_table_html()
                     extra = _evaluation_html()
+                    separator = (
+                        '<div style="margin: 16px 0; border-top: 2px solid #ccc;">'
+                        '<div style="text-align: center; margin-top: 6px;'
+                        ' font-size: 0.75em; color: #999; font-style: italic;">'
+                        'Original card</div></div>'
+                    )
                 return (
                     expected
-                    + text
                     + extra
+                    + separator
+                    + text
                     + _feedback_buttons_html(card.id, _current_variant_id)
                     + peek_panel
                 )
@@ -566,80 +574,13 @@ def _start_grading_watchdog(card_id):
     QTimer.singleShot(delay_ms, _watchdog_fire)
 
 
-def _eval_list(data, key, legacy_key=None):
-    # type: (dict, str, Optional[str]) -> list
-    """Return a deduplicated non-empty string list from evaluation payload keys."""
+def _safe_str_list(data, key):
+    # type: (dict, str) -> list
+    """Read a list-of-strings field from an already-normalized grading payload."""
     items = data.get(key)
     if not isinstance(items, list):
-        items = []
-    if not items and legacy_key:
-        legacy = data.get(legacy_key)
-        if isinstance(legacy, list):
-            items = legacy
-
-    out = []
-    seen = set()
-    for item in items:
-        text = str(item).strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        out.append(text)
-    return out
-
-
-def _eval_coverage_pct(data, alignment):
-    # type: (dict, str) -> tuple
-    """Return (coverage_pct, canonical_points, covered_points, missed_points)."""
-    canonical_points = _eval_list(data, "canonical_points")
-    covered_points = _eval_list(data, "covered_points", legacy_key="correct")
-    missed_points = _eval_list(data, "missed_points", legacy_key="missed")
-
-    if not canonical_points:
-        canonical_points = []
-        seen = set()
-        for item in (covered_points + missed_points):
-            if item in seen:
-                continue
-            seen.add(item)
-            canonical_points.append(item)
-    else:
-        canonical_set = set(canonical_points)
-        if not covered_points and missed_points:
-            missed_set = set(missed_points)
-            covered_points = [p for p in canonical_points if p not in missed_set]
-        if not missed_points and covered_points:
-            covered_set = set(covered_points)
-            missed_points = [p for p in canonical_points if p not in covered_set]
-        else:
-            covered_points = [p for p in covered_points if p in canonical_set]
-            missed_points = [p for p in missed_points if p in canonical_set]
-
-    if alignment == "misaligned":
-        return (None, canonical_points, covered_points, missed_points)
-
-    raw_pct = None
-    try:
-        raw = data.get("coverage_pct")
-        if raw is not None:
-            raw_pct = int(raw)
-    except Exception:
-        raw_pct = None
-
-    coverage_pct = None
-    denom = len(canonical_points)
-    if denom <= 0:
-        denom = len(covered_points) + len(missed_points)
-    if denom > 0:
-        covered_n = min(len(covered_points), denom)
-        coverage_pct = int(round((100.0 * covered_n) / float(denom)))
-    elif raw_pct is not None:
-        coverage_pct = raw_pct
-
-    if coverage_pct is not None:
-        coverage_pct = max(0, min(100, int(coverage_pct)))
-
-    return (coverage_pct, canonical_points, covered_points, missed_points)
+        return []
+    return [str(item).strip() for item in items if str(item).strip()]
 
 
 def _coverage_cell_html(coverage_pct):
@@ -667,17 +608,21 @@ def _coverage_cell_html(coverage_pct):
 
 def _render_evaluation_html(data):
     # type: (dict) -> str
-    """Build color-coded HTML from structured grading data."""
-    incorrect = _eval_list(data, "incorrect")
+    """Build color-coded HTML from structured grading data.
+
+    Expects data already normalized by generator._normalize_grading_payload —
+    coverage derivation is not duplicated here.
+    """
+    incorrect = _safe_str_list(data, "incorrect")
     overall = str(data.get("overall", ""))
     alignment_note = str(data.get("alignment_note", ""))
     alignment = str(data.get("alignment", "aligned")).strip().lower()
     if alignment not in ("aligned", "partial", "misaligned"):
         alignment = "aligned"
-    learning_feedback = _eval_list(data, "learning_feedback")
-    coverage_pct, _canonical_points, covered_points, missed_points = _eval_coverage_pct(
-        data, alignment
-    )
+    learning_feedback = _safe_str_list(data, "learning_feedback")
+    covered_points = _safe_str_list(data, "covered_points")
+    missed_points = _safe_str_list(data, "missed_points")
+    coverage_pct = data.get("coverage_pct")  # already computed by normalizer
 
     if alignment == "misaligned":
         parts = [
@@ -1316,24 +1261,34 @@ def _evaluation_html() -> str:
     """.format(rendered=rendered)
 
 
-def _expected_answer_html() -> str:
-    """AI answer-target box shown above the original answer."""
-    rendered = _render_saved_expected_answer()
-    if not rendered:
-        rendered = '<span style="color: #888;">&#9203; Generating answer target...</span>'
-    return """
-    <div id="variant-expected-answer" style="
-        margin-bottom: 10px;
-        padding: 10px 12px;
-        background: #f8f9fa;
-        border: 1px solid #dcdfe3;
-        border-radius: 6px;
-        font-size: 0.9em;
-        line-height: 1.45;
-    ">
-        {rendered}
-    </div>
-    """.format(rendered=rendered)
+def _answer_summary_table_html() -> str:
+    """Three-column table: variant Q, user response, AI answer target (bold)."""
+    variant_q = html.escape(str(_current_variant or ""))
+    response = html.escape(str(_user_response or "").strip())
+
+    expected_rendered = _render_saved_expected_answer()
+    if not expected_rendered:
+        expected_rendered = '<span style="color: #888;">&#9203; Generating answer target...</span>'
+
+    hdr = "padding: 6px 8px; font-weight: bold; border: 1px solid #ddd; vertical-align: top;"
+    cell = "padding: 6px 8px; vertical-align: top; border: 1px solid #ddd; font-size: 0.9em;"
+
+    return (
+        '<table style="width: 100%; border-collapse: collapse;'
+        ' margin-bottom: 8px; table-layout: fixed; border: 1px solid #ddd;">'
+        '<tr>'
+        f'<td style="{hdr} color: #5f6368; background: #f2f3f5;">Variant Q</td>'
+        f'<td style="{hdr} color: #5f6368; background: #f2f3f5;">Your answer</td>'
+        f'<td style="{hdr} color: #5f6368; background: #f2f3f5;">AI answer target</td>'
+        '</tr>'
+        '<tr>'
+        f'<td style="{cell}">{variant_q}</td>'
+        f'<td style="{cell}">{response}</td>'
+        f'<td id="variant-expected-answer" style="{cell} font-weight: bold;">'
+        f'{expected_rendered}</td>'
+        '</tr>'
+        '</table>'
+    )
 
 
 def _variant_peek_html() -> str:
@@ -1742,7 +1697,7 @@ def show_card_ideas_dialog():
                         alignment = str(eval_data.get("alignment", "aligned")).strip().lower()
                         if alignment not in ("aligned", "partial", "misaligned"):
                             alignment = "aligned"
-                        coverage_pct, _c, _v, _m = _eval_coverage_pct(eval_data, alignment)
+                        coverage_pct = eval_data.get("coverage_pct")
                         eval_parts = []
                         if overall:
                             eval_parts.append(html.escape(overall))

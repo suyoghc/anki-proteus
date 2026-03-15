@@ -21,6 +21,7 @@ API_URL = "https://api.anthropic.com/v1/messages"
 # ---------------------------------------------------------------------------
 
 ADDON_DIR = os.path.dirname(__file__)
+_LOG_PATH = os.path.join(ADDON_DIR, "proteus_diag.log")
 _USAGE_PATH = os.path.join(ADDON_DIR, "usage.json")
 _usage_lock = threading.Lock()
 _usage_tracker = None  # lazy-loaded
@@ -530,7 +531,7 @@ def grade_response(
     base_model = config.get("model", "claude-sonnet-4-20250514")
     override = str(config.get("grading_model", "")).strip()
     model = override or base_model
-    max_tokens = int(config.get("grading_max_tokens", 120))
+    max_tokens = int(config.get("grading_max_tokens", 280))
     timeout_s = float(config.get("grading_timeout_s", 10))
 
     user_msg = GRADING_USER_TEMPLATE.format(
@@ -561,6 +562,14 @@ def grade_response(
         )
     if raw is None:
         return None
+
+    # Debug: log raw grading response so truncation issues are visible.
+    try:
+        import time as _t
+        with open(_LOG_PATH, "a") as _f:
+            _f.write(f"{_t.strftime('%H:%M:%S')} grading raw ({len(raw)} chars): {raw[:1200].replace(chr(10), ' ')}\n")
+    except Exception:
+        pass
 
     try:
         data = json.loads(raw)
