@@ -689,3 +689,291 @@ class TestCardIdeas:
         assert cache.count_unused(1) == 1  # variant still there
         ideas = cache.get_ideas()
         assert len(ideas) == 1  # idea also there
+
+
+# ===========================================================================
+# 24-30  Feedback mode: prompt selection (generator.py)
+# ===========================================================================
+
+class TestFeedbackModePromptSelection:
+
+    def test_ai_mode_uses_ai_prompt_and_omits_canonical(self, monkeypatch):
+        """AI mode should use the AI-specific prompt without canonical answer."""
+        captured = {}
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            captured["system"] = system
+            captured["user_message"] = user_message
+            captured["max_tokens"] = max_tokens
+            return json.dumps({
+                "expected_answer": "The answer",
+                "ai_covered_points": ["A"],
+                "ai_missed_points": [],
+                "ai_coverage_pct": 100,
+                "overall": "Good.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m", "feedback_mode": "ai"},
+        )
+
+        assert "determine the ideal answer" in captured["system"]
+        assert "Canonical answer" not in captured["user_message"]
+        assert "Q" in captured["user_message"]
+        assert "R" in captured["user_message"]
+
+    def test_canonical_mode_uses_canonical_prompt(self, monkeypatch):
+        """Canonical mode should use the standard grading prompt with canonical answer."""
+        captured = {}
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            captured["system"] = system
+            captured["user_message"] = user_message
+            return json.dumps({
+                "alignment": "aligned",
+                "canonical_points": ["A"],
+                "covered_points": ["A"],
+                "coverage_pct": 100,
+                "overall": "Good.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m", "feedback_mode": "canonical"},
+        )
+
+        assert "canonical answer" in captured["system"].lower()
+        assert "Canonical answer:" in captured["user_message"]
+
+    def test_both_mode_uses_both_prompt_and_bumps_tokens(self, monkeypatch):
+        """Both mode should use the dual-perspective prompt and increase max_tokens."""
+        captured = {}
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            captured["system"] = system
+            captured["user_message"] = user_message
+            captured["max_tokens"] = max_tokens
+            return json.dumps({
+                "alignment": "aligned",
+                "expected_answer": "The answer",
+                "canonical_points": ["A"],
+                "covered_points": ["A"],
+                "coverage_pct": 100,
+                "ai_covered_points": ["A"],
+                "ai_missed_points": [],
+                "ai_coverage_pct": 100,
+                "overall": "Good.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m", "feedback_mode": "both"},
+        )
+
+        assert "TWO perspectives" in captured["system"]
+        assert "Canonical answer:" in captured["user_message"]
+        assert captured["max_tokens"] == int(280 * 1.4)
+
+    def test_default_feedback_mode_is_canonical(self, monkeypatch):
+        """No feedback_mode in config should default to canonical prompt."""
+        captured = {}
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            captured["system"] = system
+            return json.dumps({"overall": "ok"})
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert "TWO perspectives" not in captured["system"]
+        assert "determine the ideal answer" not in captured["system"]
+
+
+# ===========================================================================
+# 31-35  Feedback mode: normalization of ai_* fields (generator.py)
+# ===========================================================================
+
+class TestAIFieldNormalization:
+
+    def test_both_mode_returns_ai_fields(self, monkeypatch):
+        """Both-mode grading should include ai_covered/missed/coverage in output."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return json.dumps({
+                "alignment": "aligned",
+                "expected_answer": "Use random effects",
+                "canonical_points": ["A", "B"],
+                "covered_points": ["A"],
+                "missed_points": ["B"],
+                "coverage_pct": 50,
+                "ai_covered_points": ["X", "Y"],
+                "ai_missed_points": ["Z"],
+                "ai_coverage_pct": 67,
+                "overall": "Partial.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m", "feedback_mode": "both"},
+        )
+
+        # Canonical fields
+        assert out["covered_points"] == ["A"]
+        assert out["missed_points"] == ["B"]
+        assert out["coverage_pct"] == 50
+
+        # AI fields
+        assert out["ai_covered_points"] == ["X", "Y"]
+        assert out["ai_missed_points"] == ["Z"]
+        assert out["ai_coverage_pct"] == 67
+
+    def test_ai_coverage_derived_from_points(self, monkeypatch):
+        """AI coverage_pct should be recomputed from point counts."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return json.dumps({
+                "expected_answer": "Answer",
+                "ai_covered_points": ["A"],
+                "ai_missed_points": ["B", "C"],
+                "ai_coverage_pct": 99,  # LLM says 99 but points say 1/3
+                "overall": "Partial.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m", "feedback_mode": "ai"},
+        )
+
+        assert out["ai_coverage_pct"] == 33  # recomputed from 1/3
+
+    def test_canonical_mode_omits_ai_fields(self, monkeypatch):
+        """Canonical-only grading should not include ai_* keys."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return json.dumps({
+                "alignment": "aligned",
+                "canonical_points": ["A"],
+                "covered_points": ["A"],
+                "coverage_pct": 100,
+                "overall": "Good.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m", "feedback_mode": "canonical"},
+        )
+
+        assert "ai_covered_points" not in out
+        assert "ai_missed_points" not in out
+        assert "ai_coverage_pct" not in out
+
+    def test_misaligned_still_returns_ai_fields_in_both_mode(self, monkeypatch):
+        """Misaligned canonical should zero canonical but preserve AI fields."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return json.dumps({
+                "alignment": "misaligned",
+                "alignment_note": "drift",
+                "expected_answer": "Different target",
+                "canonical_points": ["A"],
+                "covered_points": ["A"],
+                "ai_covered_points": ["X"],
+                "ai_missed_points": ["Y"],
+                "ai_coverage_pct": 50,
+                "overall": "Drifted.",
+            })
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m", "feedback_mode": "both"},
+        )
+
+        # Canonical zeroed due to misalignment
+        assert out["coverage_pct"] == 0
+        assert out["covered_points"] == []
+
+        # AI fields preserved
+        assert out["ai_covered_points"] == ["X"]
+        assert out["ai_missed_points"] == ["Y"]
+        assert out["ai_coverage_pct"] == 50
+
+    def test_partial_json_extracts_ai_fields(self, monkeypatch):
+        """Truncated JSON with ai_* fields should be salvaged."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return (
+                '{"alignment":"aligned","expected_answer":"The answer",'
+                '"ai_covered_points":["point A","point B"],'
+                '"ai_missed_points":["point C"],'
+                '"overall":"Partial'
+            )
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.grade_response(
+            variant_question="Q",
+            user_response="R",
+            canonical_answer="A",
+            config={"api_key": "k", "model": "m", "feedback_mode": "both"},
+        )
+
+        assert out["expected_answer"] == "The answer"
+        assert out["ai_covered_points"] == ["point A", "point B"]
+        assert out["ai_missed_points"] == ["point C"]
+
+
+# ===========================================================================
+# 36-38  Variant generation constraints (generator.py)
+# ===========================================================================
+
+class TestVariantGenerationConstraints:
+
+    def test_variant_prompt_includes_minimalistic_constraint(self):
+        """System prompt should mention minimalistic communication."""
+        assert "minimalistically" in generator.VARIANT_SYSTEM_PROMPT
+
+    def test_variant_prompt_never_longer_constraint(self):
+        """System prompt should say never longer than original."""
+        assert "never longer than the original question" in generator.VARIANT_SYSTEM_PROMPT
+
+    def test_hard_limit_adds_question_mark(self):
+        """Hard-limited variants should end with a question mark."""
+        long = "word " * 30
+        result = generator._hard_limit_variant(long)
+        assert result.endswith("?")
+        assert len(result.split()) <= generator._MAX_VARIANT_WORDS
