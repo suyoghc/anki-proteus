@@ -12,13 +12,18 @@ Two modes:
 import html
 import json
 import os
+import random
+import re
 import time as _time
 from aqt import mw, gui_hooks
 from aqt.utils import showInfo, tooltip
 from aqt.qt import QAction, QThread, pyqtSignal, QObject
 from aqt.webview import AnkiWebView
 
-from .generator import generate_variant, grade_response, get_usage, reset_usage
+from .generator import (
+    generate_variant, grade_response, get_usage, reset_usage,
+    diag_log, DEFAULT_MODEL,
+)
 from .cache import VariantCache
 from .prefetch import PrefetchWorker
 from .batch_prefetch import BatchPrefetchManager
@@ -29,25 +34,18 @@ from .batch_prefetch import BatchPrefetchManager
 
 ADDON_DIR = os.path.dirname(__file__)
 CONFIG_PATH = os.path.join(ADDON_DIR, "config.json")
-_LOG_PATH = os.path.join(ADDON_DIR, "proteus_diag.log")
+
 
 def _log(msg: str):
     """Append a timestamped line to the diag log (only when debug_logging is on)."""
-    if not CONFIG.get("debug_logging", False):
-        return
-    ts = _time.strftime("%H:%M:%S")
-    try:
-        with open(_LOG_PATH, "a") as f:
-            f.write(f"{ts} {msg}\n")
-    except Exception:
-        pass
+    diag_log(msg, debug=CONFIG.get("debug_logging", False))
 
 def load_config():
     """Load config, merging user overrides with defaults."""
     defaults = {
         "enabled": True,                  # master on/off toggle for Proteus variants
         "api_key": "",
-        "model": "claude-sonnet-4-20250514",
+        "model": DEFAULT_MODEL,
         "response_mode": "flip",          # "flip" or "freeform"
         "active_decks": [],                # empty = all decks
         "transform_percent": 80,           # % of eligible cards to transform
@@ -268,74 +266,38 @@ def _has_enough_text(card) -> bool:
         return False
 
 
-def should_transform(card) -> bool:
-    """Decide whether this card should get a variant."""
+def _is_eligible(card) -> bool:
+    """Check all non-random eligibility criteria for variant generation."""
     if not CONFIG.get("enabled", True):
         return False
-
     if not CONFIG.get("api_key"):
         return False
-
     if _is_excluded_note_type(card):
         return False
-
     if not _has_enough_text(card):
         return False
-
-    # Check deck filter
     active = CONFIG.get("active_decks", [])
     if active:
         deck_name = mw.col.decks.name(card.did)
         if not any(a.lower() in deck_name.lower() for a in active):
             return False
-
-    # Check interval threshold
     min_ivl = CONFIG.get("min_interval_days", 0)
     if card.ivl < min_ivl:
         return False
-
-    # Probabilistic transform
-    import random
-    pct = CONFIG.get("transform_percent", 80)
-    if random.randint(1, 100) > pct:
-        return False
-
     return True
+
+
+def should_transform(card) -> bool:
+    """Decide whether this card should get a variant (includes random roll)."""
+    if not _is_eligible(card):
+        return False
+    pct = CONFIG.get("transform_percent", 80)
+    return random.randint(1, 100) <= pct
 
 
 def should_prefetch(card) -> bool:
-    """
-    Decide whether a card is eligible for pre-generation.
-
-    Same as should_transform() but WITHOUT the random roll — we always
-    prefetch eligible cards.  The random roll at review time decides
-    whether to actually show the variant or the original.
-    """
-    if not CONFIG.get("enabled", True):
-        return False
-
-    if not CONFIG.get("api_key"):
-        return False
-
-    if _is_excluded_note_type(card):
-        return False
-
-    if not _has_enough_text(card):
-        return False
-
-    # Check deck filter
-    active = CONFIG.get("active_decks", [])
-    if active:
-        deck_name = mw.col.decks.name(card.did)
-        if not any(a.lower() in deck_name.lower() for a in active):
-            return False
-
-    # Check interval threshold
-    min_ivl = CONFIG.get("min_interval_days", 0)
-    if card.ivl < min_ivl:
-        return False
-
-    return True
+    """Check eligibility for pre-generation (no random roll)."""
+    return _is_eligible(card)
 
 
 # ---------------------------------------------------------------------------
@@ -1136,9 +1098,9 @@ def _prefetch_next_card():
                 cache=_cache,
             )
             _prefetch_worker.start()
-    except Exception:
+    except Exception as e:
         # Pre-fetching is best-effort; never break the review flow
-        pass
+        _log(f"prefetch error: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1249,50 +1211,6 @@ def _cancel_batch_prefetch():
 # ---------------------------------------------------------------------------
 # HTML helpers
 # ---------------------------------------------------------------------------
-
-def _answer_side_freeform_html() -> str:
-    """Reconstruct the question-page content (variant, response, evaluation) for the answer side."""
-    parts = []
-
-    # Variant question
-    parts.append(_wrap_variant_html(_current_variant))
-
-    # User's response (static display)
-    response = html.escape(str(_user_response or "").strip())
-    if response:
-        parts.append(
-            '<div style="margin-top: 8px; padding: 12px;'
-            ' border-top: 1px solid #ddd;">'
-            '<div style="font-size: 0.85em; color: #666; margin-bottom: 6px;">'
-            'Your response:</div>'
-            '<div style="padding: 8px; background: #fafafa;'
-            ' border: 1px solid #e0e0e0; border-radius: 4px;'
-            ' font-size: 1em; color: #333;">'
-            + response + '</div></div>'
-        )
-
-    # AI answer target
-    expected_rendered = _render_saved_expected_answer()
-    if expected_rendered:
-        parts.append(
-            '<div style="margin-top: 12px; padding: 10px 12px;'
-            ' background: #f8f9fa; border: 1px solid #dcdfe3;'
-            ' border-radius: 6px; font-size: 0.9em; line-height: 1.45;">'
-            + expected_rendered + '</div>'
-        )
-
-    # Evaluation table (question-side perspective)
-    eval_rendered = _render_saved_evaluation(mode="question")
-    if eval_rendered:
-        parts.append(
-            '<div style="margin-top: 8px; margin-bottom: 8px;'
-            ' padding: 12px 14px; background: #f8f9fa;'
-            ' border: 1px solid #e0e0e0; border-radius: 6px;'
-            ' font-size: 0.9em; line-height: 1.5;">'
-            + eval_rendered + '</div>'
-        )
-
-    return "".join(parts)
 
 
 def _wrap_variant_html(variant: str) -> str:
@@ -1421,55 +1339,6 @@ def _freeform_input_html() -> str:
     )
 
 
-def _evaluation_html() -> str:
-    """Evaluation box HTML, using saved evaluation when already available."""
-    rendered = _render_saved_evaluation()
-    if not rendered:
-        rendered = '<span style="color: #888;">&#9203; Evaluating your response...</span>'
-    return """
-    <div id="variant-evaluation" style="
-        margin-bottom: 16px;
-        padding: 12px 14px;
-        background: #f8f9fa;
-        border: 1px solid #e0e0e0;
-        border-radius: 6px;
-        font-size: 0.9em;
-        line-height: 1.5;
-    ">
-        {rendered}
-    </div>
-    """.format(rendered=rendered)
-
-
-def _answer_summary_table_html() -> str:
-    """Three-column table: variant Q, user response, AI answer target (bold)."""
-    variant_q = html.escape(str(_current_variant or ""))
-    response = html.escape(str(_user_response or "").strip())
-
-    expected_rendered = _render_saved_expected_answer()
-    if not expected_rendered:
-        expected_rendered = '<span style="color: #888;">&#9203; Generating answer target...</span>'
-
-    hdr = "padding: 6px 8px; font-weight: bold; border: 1px solid #ddd; vertical-align: top;"
-    cell = "padding: 6px 8px; vertical-align: top; border: 1px solid #ddd; font-size: 0.9em;"
-
-    return (
-        '<table style="width: 100%; border-collapse: collapse;'
-        ' margin-bottom: 8px; table-layout: fixed; border: 1px solid #ddd;">'
-        '<tr>'
-        f'<td style="{hdr} color: #5f6368; background: #f2f3f5;">Variant Q</td>'
-        f'<td style="{hdr} color: #5f6368; background: #f2f3f5;">Your answer</td>'
-        f'<td style="{hdr} color: #5f6368; background: #f2f3f5;">AI answer target</td>'
-        '</tr>'
-        '<tr>'
-        f'<td style="{cell}">{variant_q}</td>'
-        f'<td style="{cell}">{response}</td>'
-        f'<td id="variant-expected-answer" style="{cell} font-weight: bold;">'
-        f'{expected_rendered}</td>'
-        '</tr>'
-        '</table>'
-    )
-
 
 def _variant_peek_html() -> str:
     """Hidden answer-side panel that can re-show the variant prompt on demand."""
@@ -1508,7 +1377,6 @@ def _extract_text(card, side: str) -> str:
         text = card.answer()
 
     # Strip HTML tags for LLM consumption
-    import re
     text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
@@ -1550,8 +1418,6 @@ def _idea_working_answer(idea):
 def _card_shape_guardrail_issues(question_text, answer_text):
     # type: (str, str) -> list
     """Return blocking issues for non-atomic card shapes."""
-    import re
-
     question = str(question_text or "").strip()
     answer = str(answer_text or "").strip()
     issues = []
@@ -2315,7 +2181,15 @@ def _try_init():
     except Exception as e:
         showInfo(f"Proteus: init failed: {e}")
 
+def _try_cleanup():
+    """Close cache on profile unload."""
+    global _cache
+    if _cache:
+        _cache.close()
+        _cache = None
+
 gui_hooks.profile_did_open.append(_try_init)
+gui_hooks.profile_will_close.append(_try_cleanup)
 
 # Also try after a short delay in case profile_did_open already fired
 from aqt.qt import QTimer

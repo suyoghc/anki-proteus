@@ -23,7 +23,7 @@ if "aqt" not in sys.modules:
     _hooks = types.ModuleType("aqt.gui_hooks")
     _hook_cls = type("_Hook", (), {"append": lambda self, fn: None})
     for _name in (
-        "profile_did_open", "card_will_show",
+        "profile_did_open", "profile_will_close", "card_will_show",
         "reviewer_did_show_question", "reviewer_did_show_answer",
         "webview_did_receive_js_message", "state_did_change",
     ):

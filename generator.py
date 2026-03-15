@@ -15,6 +15,7 @@ import urllib.error
 from typing import Optional
 
 API_URL = "https://api.anthropic.com/v1/messages"
+DEFAULT_MODEL = "claude-sonnet-4-20250514"
 
 # ---------------------------------------------------------------------------
 # Token Usage Tracking
@@ -23,6 +24,19 @@ API_URL = "https://api.anthropic.com/v1/messages"
 ADDON_DIR = os.path.dirname(__file__)
 _LOG_PATH = os.path.join(ADDON_DIR, "proteus_diag.log")
 _USAGE_PATH = os.path.join(ADDON_DIR, "usage.json")
+
+
+def diag_log(msg: str, debug: bool = True):
+    """Shared diagnostic logger. Writes to proteus_diag.log when debug is True."""
+    if not debug:
+        return
+    import time as _t
+    ts = _t.strftime("%H:%M:%S")
+    try:
+        with open(_LOG_PATH, "a") as f:
+            f.write(f"{ts} {msg}\n")
+    except Exception:
+        pass
 _usage_lock = threading.Lock()
 _usage_tracker = None  # lazy-loaded
 
@@ -186,7 +200,7 @@ def generate_variant(question: str, answer: str, config: dict) -> Optional[str]:
     if not api_key:
         return None
 
-    model = config.get("model", "claude-sonnet-4-20250514")
+    model = config.get("model", DEFAULT_MODEL)
 
     domain_ctx = ""
     if config.get("system_prompt"):
@@ -646,7 +660,7 @@ def grade_response(
     if not api_key:
         return None
 
-    base_model = config.get("model", "claude-sonnet-4-20250514")
+    base_model = config.get("model", DEFAULT_MODEL)
     override = str(config.get("grading_model", "")).strip()
     model = override or base_model
     max_tokens = int(config.get("grading_max_tokens", 280))

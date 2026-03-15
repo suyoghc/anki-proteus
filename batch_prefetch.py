@@ -11,28 +11,14 @@ counter — no cross-thread Qt signals, which avoids reentrant event
 processing crashes.
 """
 
-import os
 import queue
 import threading
-import time as _time
 from typing import List, Optional
 
 from aqt.qt import QObject, QThread, QTimer, pyqtSignal
 
-from .generator import generate_variant
+from .generator import generate_variant, diag_log as _log
 from .cache import VariantCache
-
-_LOG_PATH = os.path.join(os.path.dirname(__file__), "proteus_diag.log")
-
-def _log(msg, debug=True):
-    if not debug:
-        return
-    ts = _time.strftime("%H:%M:%S")
-    try:
-        with open(_LOG_PATH, "a") as f:
-            f.write(f"{ts} {msg}\n")
-    except Exception:
-        pass
 
 
 class _BatchWorker(QThread):
