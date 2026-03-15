@@ -98,7 +98,8 @@ Rules:
 - Do NOT make the question significantly harder or easier than the original.
 - Do NOT include the answer in your question.
 - Return ONLY the new question text. No preamble, no explanation, no labels.
-- Keep it concise — similar length to the original question.
+- Keep it concise — never longer than the original question.
+- Communicate minimalistically, prioritizing clarity and engagement.
 - Use plain text (no markdown formatting).
 """
 
@@ -291,6 +292,98 @@ Learner's response: {response}
 Evaluate their response as JSON."""
 
 
+GRADING_SYSTEM_PROMPT_AI = """You are a response evaluator for a spaced repetition system.
+
+The learner was shown a question and gave a spoken/typed response. Your job is to
+determine the ideal answer for the shown question and evaluate the response against it.
+
+Rules:
+- The response may be voice-transcribed: ignore filler words, disfluencies, grammar
+  issues, and informal phrasing. Evaluate ONLY conceptual correctness.
+- First determine what the ideal answer to the shown question would be.
+- Evaluate the response against that ideal answer — NOT against any external reference.
+- Be encouraging but honest.
+- Always provide useful related-learning observations in "learning_feedback".
+
+Return your evaluation as a JSON object with exactly these keys:
+- "expected_answer": string — concise ideal answer for the shown question
+- "ai_covered_points": array of strings — expected-answer points the learner addressed
+- "ai_missed_points": array of strings — expected-answer points the learner missed
+- "ai_coverage_pct": integer 0..100, based on expected-answer coverage
+- "learning_feedback": array of strings — concise related insights (can be empty)
+- "incorrect": array of strings — things the learner stated incorrectly (empty array if none)
+- "overall": string — 1 sentence summary of their performance
+
+Output limits (strict):
+- "expected_answer": max 28 words.
+- "overall": max 18 words.
+- Each array item: max 14 words.
+- Max 2 items in "learning_feedback".
+- Max 3 items each in "ai_covered_points" and "ai_missed_points".
+- Max 2 items in "incorrect".
+
+Keep each bullet point to one concise sentence. Return ONLY the JSON object, no markdown fences."""
+
+GRADING_USER_TEMPLATE_AI = """Question shown: {question}
+
+Learner's response: {response}
+
+Evaluate their response as JSON."""
+
+
+GRADING_SYSTEM_PROMPT_BOTH = """You are a response evaluator for a spaced repetition system.
+
+The learner was shown a question and gave a spoken/typed response. Your job is to
+evaluate their response from TWO perspectives: against the question's own ideal answer,
+and against the canonical flashcard answer.
+
+First, decide whether the shown question is aligned to the canonical answer target.
+
+Rules:
+- The response may be voice-transcribed: ignore filler words, disfluencies, grammar
+  issues, and informal phrasing. Evaluate ONLY conceptual correctness.
+- Be encouraging but honest.
+- If question and canonical answer are misaligned, DO NOT grade canonical correctness.
+- Always provide useful related-learning observations in "learning_feedback".
+
+Return your evaluation as a JSON object with exactly these keys:
+
+AI answer perspective (vs the question's ideal answer):
+- "expected_answer": string — concise answer target for the shown question
+- "ai_covered_points": array of strings — expected-answer points the learner addressed
+- "ai_missed_points": array of strings — expected-answer points the learner missed
+- "ai_coverage_pct": integer 0..100, based on expected-answer coverage
+
+Canonical answer perspective (vs the flashcard's canonical answer):
+- "alignment": string — one of "aligned", "partial", "misaligned"
+- "alignment_note": string — short reason for the alignment judgment
+- "canonical_points": array of strings — core canonical answer points
+- "covered_points": array of strings — canonical points the learner covered
+- "missed_points": array of strings — canonical points the learner missed
+- "coverage_pct": integer 0..100, based on canonical coverage
+- "question_gap_points": array of strings — canonical points not tested by the shown question
+
+Shared fields:
+- "learning_feedback": array of strings — concise related insights (can be empty)
+- "incorrect": array of strings — things the learner stated incorrectly (empty array if none)
+- "overall": string — 1 sentence summary of their performance
+
+Coverage rules:
+- If alignment is "misaligned", set canonical coverage fields to empty/0.
+- AI coverage is always evaluated (even when canonical alignment is misaligned).
+
+Output limits (strict):
+- "alignment_note": max 18 words.
+- "expected_answer": max 28 words.
+- "overall": max 18 words.
+- Each array item: max 14 words.
+- Max 2 items in "learning_feedback".
+- Max 3 items each in all point arrays.
+- Max 2 items in "incorrect".
+
+Keep each bullet point to one concise sentence. Return ONLY the JSON object, no markdown fences."""
+
+
 def _decode_json_fragment(text: str) -> str:
     """Decode a JSON-escaped string fragment; best effort."""
     try:
@@ -449,7 +542,24 @@ def _normalize_grading_payload(data: dict) -> dict:
         except Exception:
             score = 0
 
-    return {
+    # Normalize AI-answer-relative fields (present in "ai" and "both" modes)
+    ai_covered = _uniq_clean_list(data.get("ai_covered_points", []), limit=3)
+    ai_missed = _uniq_clean_list(data.get("ai_missed_points", []), limit=3)
+    ai_coverage_pct = None  # type: Optional[int]
+    try:
+        raw_ai_pct = data.get("ai_coverage_pct")
+        if raw_ai_pct is not None:
+            ai_coverage_pct = int(raw_ai_pct)
+    except Exception:
+        pass
+    if ai_covered or ai_missed:
+        ai_denom = len(ai_covered) + len(ai_missed)
+        if ai_denom > 0:
+            ai_coverage_pct = int(round(100.0 * len(ai_covered) / ai_denom))
+        if ai_coverage_pct is not None:
+            ai_coverage_pct = max(0, min(100, ai_coverage_pct))
+
+    result = {
         "alignment": alignment,
         "alignment_note": alignment_note,
         "expected_answer": expected_answer,
@@ -466,6 +576,11 @@ def _normalize_grading_payload(data: dict) -> dict:
         "overall": overall,
         "score": score,
     }
+    if ai_covered or ai_missed or ai_coverage_pct is not None:
+        result["ai_covered_points"] = ai_covered
+        result["ai_missed_points"] = ai_missed
+        result["ai_coverage_pct"] = ai_coverage_pct
+    return result
 
 
 def _parse_partial_grading_payload(raw: str) -> Optional[dict]:
@@ -488,6 +603,9 @@ def _parse_partial_grading_payload(raw: str) -> Optional[dict]:
         "missed": _extract_json_string_list_field(raw, "missed", limit=2),
         "overall": _extract_json_string_field(raw, "overall"),
         "score": _extract_json_int_field(raw, "score", default=3),
+        "ai_covered_points": _extract_json_string_list_field(raw, "ai_covered_points", limit=3),
+        "ai_missed_points": _extract_json_string_list_field(raw, "ai_missed_points", limit=3),
+        "ai_coverage_pct": _extract_json_int_field(raw, "ai_coverage_pct", default=None),
     }
 
     has_signal = any([
@@ -533,14 +651,29 @@ def grade_response(
     model = override or base_model
     max_tokens = int(config.get("grading_max_tokens", 280))
     timeout_s = float(config.get("grading_timeout_s", 10))
+    feedback_mode = str(config.get("feedback_mode", "canonical")).strip().lower()
 
-    user_msg = GRADING_USER_TEMPLATE.format(
-        question=variant_question,
-        answer=canonical_answer,
-        response=user_response,
-    )
-
-    system = GRADING_SYSTEM_PROMPT.strip()
+    if feedback_mode == "ai":
+        system = GRADING_SYSTEM_PROMPT_AI.strip()
+        user_msg = GRADING_USER_TEMPLATE_AI.format(
+            question=variant_question,
+            response=user_response,
+        )
+    elif feedback_mode == "both":
+        system = GRADING_SYSTEM_PROMPT_BOTH.strip()
+        user_msg = GRADING_USER_TEMPLATE.format(
+            question=variant_question,
+            answer=canonical_answer,
+            response=user_response,
+        )
+        max_tokens = int(max_tokens * 1.4)  # more fields to produce
+    else:
+        system = GRADING_SYSTEM_PROMPT.strip()
+        user_msg = GRADING_USER_TEMPLATE.format(
+            question=variant_question,
+            answer=canonical_answer,
+            response=user_response,
+        )
 
     raw = _call_api(
         api_key,

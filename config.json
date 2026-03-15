@@ -17,5 +17,6 @@
     "submit_delay_ms": 750,
     "grading_model": "",
     "grading_max_tokens": 280,
-    "grading_timeout_s": 10
+    "grading_timeout_s": 10,
+    "feedback_mode": "both"
 }

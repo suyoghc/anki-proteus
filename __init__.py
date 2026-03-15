@@ -64,6 +64,7 @@ def load_config():
         "grading_model": "",               # optional override for grading model
         "grading_max_tokens": 280,         # room for full grading schema
         "grading_timeout_s": 10,           # fail fast if grading is slow
+        "feedback_mode": "both",           # "ai", "canonical", or "both"
     }
     conf = mw.addonManager.getConfig(__name__)
     if conf:
@@ -131,6 +132,12 @@ def init_addon():
     peek_action.setShortcut("Ctrl+Shift+B")
     peek_action.triggered.connect(toggle_variant_peek)
     mw.form.menuTools.addAction(peek_action)
+
+    # Add back-to-question shortcut (Cmd/Ctrl+Shift+Left)
+    back_action = QAction("Back to Question", mw)
+    back_action.setShortcut("Ctrl+Shift+Left")
+    back_action.triggered.connect(go_back_to_question)
+    mw.form.menuTools.addAction(back_action)
 
     # Add usage stats menu item
     usage_action = QAction("Proteus Usage Stats", mw)
@@ -217,6 +224,22 @@ def toggle_variant_peek():
         })();
         """
     )
+
+
+_returning_to_question = False  # flag to preserve state on re-show
+
+
+def go_back_to_question():
+    # type: () -> None
+    """Navigate from answer side back to question side, preserving freeform state."""
+    global _returning_to_question
+    if not mw.reviewer:
+        return
+    reviewer_state = str(getattr(mw.reviewer, "state", "") or "")
+    if reviewer_state != "answer":
+        return
+    _returning_to_question = True
+    mw.reviewer._showQuestion()
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +349,18 @@ def on_card_will_show(text: str, card, kind: str) -> str:
 
     try:
         if kind.endswith("Question"):
+            global _returning_to_question
+
+            # Re-showing the same card (back from answer) — preserve state
+            if _returning_to_question and card.id == _current_card_id and _current_variant:
+                _returning_to_question = False
+                styled_variant = _wrap_variant_html(_current_variant)
+                styled_variant += _feedback_buttons_html(card.id, _current_variant_id)
+                if CONFIG.get("response_mode") == "freeform":
+                    styled_variant += _freeform_input_html()
+                return styled_variant
+
+            _returning_to_question = False
             _evaluation_text = None
             _current_variant = None
             _current_variant_id = None
@@ -350,23 +385,23 @@ def on_card_will_show(text: str, card, kind: str) -> str:
 
         elif kind.endswith("Answer"):
             if _current_variant and _current_variant_id is not None:
-                extra = ""
-                expected = ""
-                separator = ""
                 peek_panel = _variant_peek_html()
+                eval_html = ""
                 if CONFIG.get("response_mode") == "freeform" and _user_response.strip():
-                    expected = _answer_summary_table_html()
-                    extra = _evaluation_html()
-                    separator = (
-                        '<div style="margin: 16px 0; border-top: 2px solid #ccc;">'
-                        '<div style="text-align: center; margin-top: 6px;'
-                        ' font-size: 0.75em; color: #999; font-style: italic;">'
-                        'Original card</div></div>'
-                    )
+                    eval_rendered = _render_saved_evaluation()
+                    if eval_rendered:
+                        eval_html = (
+                            '<div style="margin-top: 12px; margin-bottom: 4px;'
+                            ' font-size: 0.84em; color: #666;">'
+                            '<b>Feedback w.r.t. canonical content</b></div>'
+                            '<div style="margin-bottom: 8px;'
+                            ' padding: 12px 14px; background: #f8f9fa;'
+                            ' border: 1px solid #e0e0e0; border-radius: 6px;'
+                            ' font-size: 0.9em; line-height: 1.5;">'
+                            + eval_rendered + '</div>'
+                        )
                 return (
-                    expected
-                    + extra
-                    + separator
+                    eval_html
                     + text
                     + _feedback_buttons_html(card.id, _current_variant_id)
                     + peek_panel
@@ -384,8 +419,63 @@ def on_card_will_show(text: str, card, kind: str) -> str:
 # ---------------------------------------------------------------------------
 
 def on_question_shown(card):
-    """After showing question, pre-fetch variant for next card."""
+    """After showing question, pre-fetch next card and restore freeform state if returning."""
     _prefetch_next_card()
+    _restore_freeform_state()
+
+
+def _restore_freeform_state():
+    """Re-inject saved response and evaluation into the question page after re-show."""
+    if not _user_response.strip() or not _current_variant:
+        return
+    if not (mw.reviewer and mw.reviewer.web):
+        return
+
+    parts = []
+
+    # Restore textarea value and disable it
+    response_js = json.dumps(_user_response)
+    parts.append(f"""
+        var ta = document.getElementById('variant-response-input');
+        if (ta) {{
+            ta.value = {response_js};
+            ta.disabled = true;
+            ta.style.opacity = '0.5';
+        }}
+    """)
+
+    # Restore evaluation if available
+    if _evaluation_text:
+        try:
+            data = json.loads(_evaluation_text)
+            rendered = _render_evaluation_html(data, mode="question")
+            expected_rendered = None
+            if isinstance(data, dict):
+                expected_rendered = _render_expected_answer_content(data)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            rendered = html.escape(str(_evaluation_text)).replace("\n", "<br>")
+            expected_rendered = None
+
+        if not expected_rendered:
+            expected_rendered = (
+                "<span style='color: #666; font-style: italic;'>"
+                "Answer target unavailable.</span>"
+            )
+
+        eval_js = json.dumps(rendered)
+        expected_js = json.dumps(expected_rendered)
+        parts.append(f"""
+            var el = document.getElementById('variant-evaluation');
+            if (el) {{ el.innerHTML = {eval_js}; el.style.display = 'block'; }}
+            var hdr = document.getElementById('variant-evaluation-header');
+            if (hdr) {{ hdr.style.display = 'block'; }}
+            var exp = document.getElementById('variant-expected-answer');
+            if (exp) {{ exp.innerHTML = {expected_js}; exp.style.display = 'block'; }}
+        """)
+
+    if parts:
+        js = "(function() {" + "".join(parts) + "})();"
+        mw.reviewer.web.eval(js)
 
 
 class _GradingWorker(QThread):
@@ -449,7 +539,10 @@ def _set_evaluation_message(message):
         var el = document.getElementById('variant-evaluation');
         if (el) {{
             el.innerHTML = {js_str};
+            el.style.display = 'block';
         }}
+        var hdr = document.getElementById('variant-evaluation-header');
+        if (hdr) {{ hdr.style.display = 'block'; }}
     }})();
     """
     mw.reviewer.web.eval(js)
@@ -471,6 +564,7 @@ def _set_expected_answer_message(message):
         var el = document.getElementById('variant-expected-answer');
         if (el) {{
             el.innerHTML = {js_str};
+            el.style.display = 'block';
         }}
     }})();
     """
@@ -486,14 +580,14 @@ def _card_ids_match(card_id):
         return str(card_id) == str(_current_card_id)
 
 
-def _render_saved_evaluation():
-    # type: () -> Optional[str]
+def _render_saved_evaluation(mode="answer"):
+    # type: (str) -> Optional[str]
     """Return rendered HTML for any saved evaluation text, or None."""
     if not _evaluation_text:
         return None
     try:
         data = json.loads(_evaluation_text)
-        return _render_evaluation_html(data)
+        return _render_evaluation_html(data, mode=mode)
     except (json.JSONDecodeError, ValueError, TypeError):
         return html.escape(str(_evaluation_text)).replace("\n", "<br>")
 
@@ -606,12 +700,14 @@ def _coverage_cell_html(coverage_pct):
     )
 
 
-def _render_evaluation_html(data):
-    # type: (dict) -> str
+def _render_evaluation_html(data, mode="answer"):
+    # type: (dict, str) -> str
     """Build color-coded HTML from structured grading data.
 
-    Expects data already normalized by generator._normalize_grading_payload —
-    coverage derivation is not duplicated here.
+    mode="question": feedback vs AI answer — addressed, incorrect, related.
+    mode="answer":   feedback vs canonical — addressed, remaining, incorrect, coverage donut.
+
+    Expects data already normalized by generator._normalize_grading_payload.
     """
     incorrect = _safe_str_list(data, "incorrect")
     overall = str(data.get("overall", ""))
@@ -671,41 +767,60 @@ def _render_evaluation_html(data):
             )
         return "".join(parts)
 
-    columns = [
-        {
-            "items": covered_points,
-            "label": "Addressed",
-            "color": "#66bb6a",
-            "bg": "#e8f5e9",
-        },
-        {
-            "items": missed_points,
-            "label": "Remaining target points",
-            "color": "#ffa726",
-            "bg": "#fff8e1",
-        },
-        {
-            "items": incorrect,
-            "label": "Incorrect",
-            "color": "#ef5350",
-            "bg": "#fce4ec",
-        },
-    ]
-    if learning_feedback:
-        columns.append({
-            "items": learning_feedback,
-            "label": "Related",
-            "color": "#1e88e5",
-            "bg": "#e3f2fd",
-        })
-    if coverage_pct is not None:
-        columns.append({
-            "items": None,
-            "label": "Target coverage",
-            "color": "#5f6368",
-            "bg": "#f2f3f5",
-            "coverage_pct": coverage_pct,
-        })
+    feedback_mode = str(CONFIG.get("feedback_mode", "both")).strip().lower()
+
+    if mode == "question":
+        # Question side: use ai_* fields when available (both/ai modes)
+        if feedback_mode in ("ai", "both"):
+            ai_covered = _safe_str_list(data, "ai_covered_points") or covered_points
+            ai_missed = _safe_str_list(data, "ai_missed_points")
+            ai_pct = data.get("ai_coverage_pct")
+            columns = [
+                {"items": ai_covered, "label": "Addressed",
+                 "color": "#66bb6a", "bg": "#e8f5e9"},
+                {"items": ai_missed, "label": "Missed",
+                 "color": "#ffa726", "bg": "#fff8e1"},
+                {"items": incorrect, "label": "Incorrect",
+                 "color": "#ef5350", "bg": "#fce4ec"},
+            ]
+            if learning_feedback:
+                columns.append({"items": learning_feedback, "label": "Related",
+                                "color": "#1e88e5", "bg": "#e3f2fd"})
+            if ai_pct is not None:
+                columns.append({"items": None, "label": "AI coverage",
+                                "color": "#5f6368", "bg": "#f2f3f5",
+                                "coverage_pct": ai_pct})
+        else:
+            # canonical-only mode: minimal question side
+            columns = [
+                {"items": covered_points, "label": "Addressed",
+                 "color": "#66bb6a", "bg": "#e8f5e9"},
+                {"items": incorrect, "label": "Incorrect",
+                 "color": "#ef5350", "bg": "#fce4ec"},
+            ]
+            if learning_feedback:
+                columns.append({"items": learning_feedback, "label": "Related",
+                                "color": "#1e88e5", "bg": "#e3f2fd"})
+    else:
+        if feedback_mode == "ai":
+            # ai-only mode: no answer-side feedback
+            return ""
+        # Answer side: canonical coverage
+        columns = [
+            {"items": covered_points, "label": "Addressed",
+             "color": "#66bb6a", "bg": "#e8f5e9"},
+            {"items": missed_points, "label": "Remaining target points",
+             "color": "#ffa726", "bg": "#fff8e1"},
+            {"items": incorrect, "label": "Incorrect",
+             "color": "#ef5350", "bg": "#fce4ec"},
+        ]
+        if learning_feedback:
+            columns.append({"items": learning_feedback, "label": "Related",
+                            "color": "#1e88e5", "bg": "#e3f2fd"})
+        if coverage_pct is not None:
+            columns.append({"items": None, "label": "Target coverage",
+                            "color": "#5f6368", "bg": "#f2f3f5",
+                            "coverage_pct": coverage_pct})
 
     # Only include populated columns (plus coverage meter column)
     active = []
@@ -804,7 +919,7 @@ def _on_grading_done(card_id, evaluation_json):
     expected_rendered = None
     try:
         data = json.loads(evaluation_json)
-        rendered = _render_evaluation_html(data)
+        rendered = _render_evaluation_html(data, mode="question")
         if isinstance(data, dict):
             expected_rendered = _render_expected_answer_content(data)
     except (json.JSONDecodeError, ValueError, TypeError):
@@ -826,10 +941,14 @@ def _on_grading_done(card_id, evaluation_json):
             var el = document.getElementById('variant-evaluation');
             if (el) {{
                 el.innerHTML = {js_str};
+                el.style.display = 'block';
             }}
+            var hdr = document.getElementById('variant-evaluation-header');
+            if (hdr) {{ hdr.style.display = 'block'; }}
             var expectedEl = document.getElementById('variant-expected-answer');
             if (expectedEl) {{
                 expectedEl.innerHTML = {expected_js_str};
+                expectedEl.style.display = 'block';
             }}
         }})();
         """
@@ -1131,6 +1250,51 @@ def _cancel_batch_prefetch():
 # HTML helpers
 # ---------------------------------------------------------------------------
 
+def _answer_side_freeform_html() -> str:
+    """Reconstruct the question-page content (variant, response, evaluation) for the answer side."""
+    parts = []
+
+    # Variant question
+    parts.append(_wrap_variant_html(_current_variant))
+
+    # User's response (static display)
+    response = html.escape(str(_user_response or "").strip())
+    if response:
+        parts.append(
+            '<div style="margin-top: 8px; padding: 12px;'
+            ' border-top: 1px solid #ddd;">'
+            '<div style="font-size: 0.85em; color: #666; margin-bottom: 6px;">'
+            'Your response:</div>'
+            '<div style="padding: 8px; background: #fafafa;'
+            ' border: 1px solid #e0e0e0; border-radius: 4px;'
+            ' font-size: 1em; color: #333;">'
+            + response + '</div></div>'
+        )
+
+    # AI answer target
+    expected_rendered = _render_saved_expected_answer()
+    if expected_rendered:
+        parts.append(
+            '<div style="margin-top: 12px; padding: 10px 12px;'
+            ' background: #f8f9fa; border: 1px solid #dcdfe3;'
+            ' border-radius: 6px; font-size: 0.9em; line-height: 1.45;">'
+            + expected_rendered + '</div>'
+        )
+
+    # Evaluation table (question-side perspective)
+    eval_rendered = _render_saved_evaluation(mode="question")
+    if eval_rendered:
+        parts.append(
+            '<div style="margin-top: 8px; margin-bottom: 8px;'
+            ' padding: 12px 14px; background: #f8f9fa;'
+            ' border: 1px solid #e0e0e0; border-radius: 6px;'
+            ' font-size: 0.9em; line-height: 1.5;">'
+            + eval_rendered + '</div>'
+        )
+
+    return "".join(parts)
+
+
 def _wrap_variant_html(variant: str) -> str:
     """Wrap variant question in styled HTML."""
     safe_variant = html.escape(variant)
@@ -1202,8 +1366,7 @@ def _feedback_buttons_html(card_id: int, variant_id: int) -> str:
 
 
 def _freeform_input_html() -> str:
-    """HTML for the freeform text response area."""
-    delay = CONFIG.get("submit_delay_ms", 750)
+    """HTML for the freeform text response area with inline grading placeholders."""
     return (
         '<div id="variant-response-area" style="'
         'margin-top: 20px; padding: 12px; border-top: 1px solid #ddd;">'
@@ -1221,9 +1384,26 @@ def _freeform_input_html() -> str:
         """ pycmd('variantResponse:' + this.value);"""
         """ pycmd('startGrading');"""
         " this.disabled = true; this.style.opacity = '0.5';"
-        """ setTimeout(function() { pycmd('ans'); }, """ + str(delay) + """);}"""
-        '"'
+        '}"'
         '></textarea></div>'
+        # Placeholders for inline grading results (filled by JS when ready)
+        '<div id="variant-expected-answer" style="display: none;'
+        ' margin-top: 12px; padding: 10px 12px; background: #f8f9fa;'
+        ' border: 1px solid #dcdfe3; border-radius: 6px;'
+        ' font-size: 0.9em; line-height: 1.45;"></div>'
+        + (
+            '<div id="variant-evaluation-header" style="display: none;'
+            ' margin-top: 12px; margin-bottom: 4px; font-size: 0.84em;'
+            ' color: #666;"><b>Feedback w.r.t. AI answer</b></div>'
+            if CONFIG.get("feedback_mode", "both") != "canonical" else
+            '<div id="variant-evaluation-header" style="display: none;'
+            ' margin-top: 12px; margin-bottom: 4px; font-size: 0.84em;'
+            ' color: #666;"><b>Feedback w.r.t. canonical content</b></div>'
+        ) +
+        '<div id="variant-evaluation" style="display: none;'
+        ' margin-bottom: 8px; padding: 12px 14px;'
+        ' background: #f8f9fa; border: 1px solid #e0e0e0;'
+        ' border-radius: 6px; font-size: 0.9em; line-height: 1.5;"></div>'
         '<script>'
         '(function() {'
         ' if (window._proteusPollingId) { clearInterval(window._proteusPollingId); }'
