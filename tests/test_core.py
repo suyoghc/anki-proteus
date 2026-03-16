@@ -3,6 +3,7 @@
 import ast
 import json
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -526,6 +527,91 @@ class TestVariantCache:
             remaining = [r[0] for r in rows]
         assert 1 not in remaining
         assert 2 in remaining
+
+
+# ===========================================================================
+# Schema versioning (cache.py)
+# ===========================================================================
+
+class TestSchemaMigration:
+
+    def test_fresh_db_gets_latest_version(self, tmp_path):
+        """A brand-new database should be at _SCHEMA_VERSION."""
+        c = VariantCache(str(tmp_path), max_variants=3)
+        version = c._conn.execute("PRAGMA user_version").fetchone()[0]
+        c.close()
+        from cache import _SCHEMA_VERSION
+        assert version == _SCHEMA_VERSION
+
+    def test_v0_db_migrates_to_latest(self, tmp_path):
+        """A v0 database (no tables) should be fully migrated."""
+        db_path = str(tmp_path / "variant_cache.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA user_version = 0")
+        conn.commit()
+        conn.close()
+
+        c = VariantCache(str(tmp_path), max_variants=3)
+        version = c._conn.execute("PRAGMA user_version").fetchone()[0]
+
+        # Verify all tables and columns exist
+        c.store_variant(1, "Test variant")
+        c.record_feedback(1, 1)  # rating column exists
+        idea_id = c.save_idea(1, "V", "Q", "A", evaluation="e",
+                              edited_variant_text="ev",
+                              edited_answer_text="ea")
+        c.set_idea_decision(idea_id, "accepted", "good")
+        ideas = c.get_ideas(include_used=False)
+        assert len(ideas) == 1
+        assert ideas[0]["edited_answer_text"] == "ea"
+        assert ideas[0]["decision_status"] == "accepted"
+
+        from cache import _SCHEMA_VERSION
+        assert version == _SCHEMA_VERSION
+        c.close()
+
+    def test_pre_versioned_db_upgrades(self, tmp_path):
+        """A database with tables but user_version=0 (pre-versioning) migrates safely."""
+        db_path = str(tmp_path / "variant_cache.db")
+        conn = sqlite3.connect(db_path)
+        # Create v0-style tables (original schema, no rating)
+        conn.execute("""
+            CREATE TABLE variants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                card_id INTEGER NOT NULL,
+                variant_text TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                used INTEGER DEFAULT 0
+            )
+        """)
+        conn.execute("INSERT INTO variants (card_id, variant_text, created_at, used) VALUES (42, 'old', 1000, 0)")
+        conn.commit()
+        conn.close()
+
+        c = VariantCache(str(tmp_path), max_variants=3)
+        # Old data preserved
+        result = c.get_variant(42)
+        assert result is not None
+        assert result[1] == "old"
+        # New columns work
+        c.store_variant(42, "new")
+        idea_id = c.save_idea(42, "V", "Q", "A", edited_answer_text="ea")
+        ideas = c.get_ideas()
+        assert ideas[0]["edited_answer_text"] == "ea"
+        c.close()
+
+    def test_already_current_db_is_noop(self, tmp_path):
+        """Opening an already-current database doesn't error."""
+        c1 = VariantCache(str(tmp_path), max_variants=3)
+        c1.store_variant(1, "V1")
+        c1.close()
+
+        c2 = VariantCache(str(tmp_path), max_variants=3)
+        assert c2.has_variant(1)
+        version = c2._conn.execute("PRAGMA user_version").fetchone()[0]
+        from cache import _SCHEMA_VERSION
+        assert version == _SCHEMA_VERSION
+        c2.close()
 
 
 # ===========================================================================

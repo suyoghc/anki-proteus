@@ -6,6 +6,8 @@ and handles cleanup of stale entries.
 
 Thread-safe: uses check_same_thread=False and a lock so the
 prefetch QThread can write without raising ProgrammingError.
+
+Schema versioning uses PRAGMA user_version to track migrations.
 """
 
 import os
@@ -13,6 +15,8 @@ import sqlite3
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
+
+_SCHEMA_VERSION = 6
 
 
 class VariantCache:
@@ -23,81 +27,101 @@ class VariantCache:
         self._max_variants = max_variants
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
-        self._create_tables()
+        self._migrate()
 
-    def _create_tables(self):
+    def _get_version(self) -> int:
+        return self._conn.execute("PRAGMA user_version").fetchone()[0]
+
+    def _set_version(self, version: int):
+        self._conn.execute(f"PRAGMA user_version = {int(version)}")
+
+    def _migrate(self):
         with self._lock:
-            self._conn.execute("""
-                CREATE TABLE IF NOT EXISTS variants (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    card_id INTEGER NOT NULL,
-                    variant_text TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    used INTEGER DEFAULT 0
-                )
-            """)
-            self._conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_card_id
-                ON variants (card_id, used)
-            """)
-            # Migration: add rating column if missing
-            try:
-                self._conn.execute(
-                    "ALTER TABLE variants ADD COLUMN rating INTEGER DEFAULT NULL"
-                )
-            except sqlite3.OperationalError:
-                pass  # column already exists
-            self._conn.execute("""
-                CREATE TABLE IF NOT EXISTS card_ideas (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    card_id INTEGER NOT NULL,
-                    variant_text TEXT NOT NULL,
-                    original_question TEXT NOT NULL,
-                    original_answer TEXT NOT NULL,
-                    rating INTEGER DEFAULT NULL,
-                    created_at REAL NOT NULL,
-                    used INTEGER DEFAULT 0
-                )
-            """)
-            self._conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_card_ideas_used
-                ON card_ideas (used)
-            """)
-            # Migration: add evaluation column if missing
-            try:
-                self._conn.execute(
-                    "ALTER TABLE card_ideas ADD COLUMN evaluation TEXT DEFAULT NULL"
-                )
-            except sqlite3.OperationalError:
-                pass  # column already exists
-            # Migration: add edited variant text if missing
-            try:
-                self._conn.execute(
-                    "ALTER TABLE card_ideas ADD COLUMN edited_variant_text TEXT DEFAULT NULL"
-                )
-            except sqlite3.OperationalError:
-                pass  # column already exists
-            # Migration: add human decision label if missing
-            try:
-                self._conn.execute(
-                    "ALTER TABLE card_ideas ADD COLUMN decision_status TEXT DEFAULT 'pending'"
-                )
-            except sqlite3.OperationalError:
-                pass  # column already exists
-            # Migration: add optional human reason tag if missing
-            try:
-                self._conn.execute(
-                    "ALTER TABLE card_ideas ADD COLUMN decision_reason TEXT DEFAULT NULL"
-                )
-            except sqlite3.OperationalError:
-                pass  # column already exists
-            # Migration: add edited answer text if missing
-            try:
-                self._conn.execute(
-                    "ALTER TABLE card_ideas ADD COLUMN edited_answer_text TEXT DEFAULT NULL"
-                )
-            except sqlite3.OperationalError:
-                pass  # column already exists
+            version = self._get_version()
+
+            if version < 1:
+                self._conn.execute("""
+                    CREATE TABLE IF NOT EXISTS variants (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        card_id INTEGER NOT NULL,
+                        variant_text TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        used INTEGER DEFAULT 0,
+                        rating INTEGER DEFAULT NULL
+                    )
+                """)
+                self._conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_card_id
+                    ON variants (card_id, used)
+                """)
+
+            if version < 2:
+                # v1 DBs have variants but no rating column
+                if version == 1:
+                    try:
+                        self._conn.execute(
+                            "ALTER TABLE variants ADD COLUMN rating INTEGER DEFAULT NULL"
+                        )
+                    except sqlite3.OperationalError:
+                        pass
+                self._conn.execute("""
+                    CREATE TABLE IF NOT EXISTS card_ideas (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        card_id INTEGER NOT NULL,
+                        variant_text TEXT NOT NULL,
+                        original_question TEXT NOT NULL,
+                        original_answer TEXT NOT NULL,
+                        rating INTEGER DEFAULT NULL,
+                        created_at REAL NOT NULL,
+                        used INTEGER DEFAULT 0
+                    )
+                """)
+                self._conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_card_ideas_used
+                    ON card_ideas (used)
+                """)
+
+            if version < 3:
+                try:
+                    self._conn.execute(
+                        "ALTER TABLE card_ideas ADD COLUMN evaluation TEXT DEFAULT NULL"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
+            if version < 4:
+                try:
+                    self._conn.execute(
+                        "ALTER TABLE card_ideas ADD COLUMN edited_variant_text TEXT DEFAULT NULL"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
+            if version < 5:
+                try:
+                    self._conn.execute(
+                        "ALTER TABLE card_ideas ADD COLUMN decision_status TEXT DEFAULT 'pending'"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    self._conn.execute(
+                        "ALTER TABLE card_ideas ADD COLUMN decision_reason TEXT DEFAULT NULL"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
+            if version < 6:
+                try:
+                    self._conn.execute(
+                        "ALTER TABLE card_ideas ADD COLUMN edited_answer_text TEXT DEFAULT NULL"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
+            if version < _SCHEMA_VERSION:
+                self._set_version(_SCHEMA_VERSION)
+
             self._conn.commit()
 
     def get_variant(self, card_id: int) -> Optional[Tuple[int, str]]:
