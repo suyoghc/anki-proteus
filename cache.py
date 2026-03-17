@@ -148,6 +148,15 @@ class VariantCache:
                 return (variant_id, text)
             return None
 
+    def get_variant_by_id(self, variant_id: int) -> Optional[Tuple[int, str, Optional[int]]]:
+        """Look up a variant by row id. Returns (card_id, variant_text, rating) or None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT card_id, variant_text, rating FROM variants WHERE id = ?",
+                (variant_id,),
+            ).fetchone()
+            return row if row else None
+
     def record_feedback(self, variant_id: int, rating: int):
         """Store user feedback for a variant. rating: 1 (up) or -1 (down)."""
         with self._lock:

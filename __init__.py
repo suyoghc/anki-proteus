@@ -1547,16 +1547,12 @@ def _save_current_idea(card_id=None, variant_id=None):
         rating = None
 
         if target_variant_id is not None:
-            with _cache._lock:
-                row = _cache._conn.execute(
-                    "SELECT card_id, variant_text, rating FROM variants WHERE id = ?",
-                    (target_variant_id,),
-                ).fetchone()
-                if row:
-                    db_card_id, db_variant_text, db_rating = row
-                    target_card_id = int(db_card_id)
-                    variant_text = str(db_variant_text or "")
-                    rating = db_rating
+            row = _cache.get_variant_by_id(target_variant_id)
+            if row:
+                db_card_id, db_variant_text, db_rating = row
+                target_card_id = int(db_card_id)
+                variant_text = str(db_variant_text or "")
+                rating = db_rating
 
         if not variant_text or target_card_id is None:
             return
