@@ -1290,7 +1290,7 @@ def _freeform_input_html() -> str:
         '}"'
         '></textarea></div>'
         # Expected answer: pre-populated from cache if available, otherwise hidden placeholder
-        + _prefilled_expected_answer_html() +
+        + _prefilled_expected_answer_html()
         + (
             '<div id="variant-evaluation-header" style="display: none;'
             ' margin-top: 12px; margin-bottom: 4px; font-size: 0.84em;'
