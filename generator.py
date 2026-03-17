@@ -256,6 +256,86 @@ VARIANT_STYLES = {
         "max_chars": 250,
         "grading_addendum": "Evaluate whether the learner correctly identifies the concept illustrated by the real-world example.",
     },
+    "transfer_code": {
+        "system_prompt": (
+            "You are a question variant generator for a spaced repetition system.\n\n"
+            "Your job: given an original flashcard (question + answer), generate a short\n"
+            "code snippet that embeds the concept, plus a question about it.\n\n"
+            "Rules:\n"
+            "- Show a realistic code snippet (Python preferred, 3-8 lines).\n"
+            "- The code must illustrate or violate the concept from the flashcard.\n"
+            "- Ask: debug it, predict output, improve it, or identify the technique.\n"
+            "- Test the SAME concept as the original flashcard.\n"
+            + _VARIANT_SHARED_STYLE
+            + "\n\nExpected answer rules:\n"
+            "- Name the concept and explain how it applies to the code.\n"
+            "- Max 20 words.\n\n"
+            "Return a JSON object with exactly three keys:\n"
+            "- \"code\": the code snippet (plain text, no markdown fences)\n"
+            "- \"question\": a short question about the code\n"
+            "- \"expected_answer\": the answer connecting code to concept\n\n"
+            "Return ONLY the JSON object, no markdown fences.\n"
+        ),
+        "max_words": 25,
+        "max_chars": 180,
+        "grading_addendum": "The learner was shown a code snippet. Evaluate whether they correctly identify the concept illustrated and how it applies.",
+        "visual": True,
+        "artifact_key": "code",
+    },
+    "transfer_stats": {
+        "system_prompt": (
+            "You are a question variant generator for a spaced repetition system.\n\n"
+            "Your job: given an original flashcard (question + answer), generate realistic\n"
+            "statistical output that embeds the concept, plus a question about it.\n\n"
+            "Rules:\n"
+            "- Show model output, residual patterns, coefficient tables, or test results.\n"
+            "- Use plain text formatting (aligned columns, no markdown).\n"
+            "- The output must illustrate or violate the concept from the flashcard.\n"
+            "- Ask: interpret, diagnose, or identify the assumption/technique.\n"
+            "- Test the SAME concept as the original flashcard.\n"
+            + _VARIANT_SHARED_STYLE
+            + "\n\nExpected answer rules:\n"
+            "- Name the concept and explain how the output shows it.\n"
+            "- Max 20 words.\n\n"
+            "Return a JSON object with exactly three keys:\n"
+            "- \"code\": the statistical output (plain text)\n"
+            "- \"question\": a short question about the output\n"
+            "- \"expected_answer\": the answer connecting output to concept\n\n"
+            "Return ONLY the JSON object, no markdown fences.\n"
+        ),
+        "max_words": 25,
+        "max_chars": 180,
+        "grading_addendum": "The learner was shown statistical output. Evaluate whether they correctly interpret it and identify the relevant concept.",
+        "visual": True,
+        "artifact_key": "code",
+    },
+    "transfer_math": {
+        "system_prompt": (
+            "You are a question variant generator for a spaced repetition system.\n\n"
+            "Your job: given an original flashcard (question + answer), generate a short\n"
+            "equation, proof step, or worked example that embeds the concept, plus a question.\n\n"
+            "Rules:\n"
+            "- Show an equation, derivation step, or worked example (2-5 lines).\n"
+            "- Use plain text math notation (e.g., x^2, sqrt(n), sum_{i=1}^{n}).\n"
+            "- The math must illustrate, apply, or contain an error related to the concept.\n"
+            "- Ask: find the error, identify the technique, or predict the next step.\n"
+            "- Test the SAME concept as the original flashcard.\n"
+            + _VARIANT_SHARED_STYLE
+            + "\n\nExpected answer rules:\n"
+            "- Name the concept and explain how it applies to the math shown.\n"
+            "- Max 20 words.\n\n"
+            "Return a JSON object with exactly three keys:\n"
+            "- \"code\": the mathematical content (plain text)\n"
+            "- \"question\": a short question about it\n"
+            "- \"expected_answer\": the answer connecting math to concept\n\n"
+            "Return ONLY the JSON object, no markdown fences.\n"
+        ),
+        "max_words": 25,
+        "max_chars": 180,
+        "grading_addendum": "The learner was shown a mathematical expression or derivation. Evaluate whether they correctly identify the concept or error.",
+        "visual": True,
+        "artifact_key": "code",
+    },
     "cloze_generation": {
         "system_prompt": (
             "You are a question variant generator for a spaced repetition system.\n\n"
@@ -441,21 +521,22 @@ def generate_variant(question: str, answer: str, config: dict,
     # Parse JSON response; fall back to treating raw text as question only
     expected_answer = ""
     svg = ""
+    artifact_key = style.get("artifact_key", "svg")
     try:
         parsed = json.loads(raw)
         variant = _normalize_variant_text(str(parsed.get("question", "")))
         expected_answer = str(parsed.get("expected_answer", "")).strip()
         if is_visual:
-            raw_svg = parsed.get("svg")
-            if raw_svg and str(raw_svg).strip().lower() not in ("null", "none", ""):
-                svg = str(raw_svg).strip()
+            raw_artifact = parsed.get(artifact_key)
+            if raw_artifact and str(raw_artifact).strip().lower() not in ("null", "none", ""):
+                svg = str(raw_artifact).strip()
             else:
-                # LLM opted out of diagram — treat as text-only
+                # LLM opted out — treat as text-only
                 is_visual = False
                 style_name = "wozniak_matuschak"
     except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
         if is_visual:
-            # Visual styles require valid JSON with svg field — no fallback
+            # Visual/artifact styles require valid JSON — no fallback
             return None
         variant = _normalize_variant_text(raw)
 

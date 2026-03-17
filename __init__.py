@@ -1208,16 +1208,28 @@ def _cancel_batch_prefetch():
 
 
 def _wrap_variant_html(variant: str) -> str:
-    """Wrap variant question in styled HTML. Renders SVG if present."""
+    """Wrap variant question in styled HTML. Renders SVG or code artifacts if present."""
+    from .generator import VARIANT_STYLES
     safe_variant = html.escape(variant)
-    svg_block = ""
+    artifact_block = ""
     if _current_svg:
-        # SVG is rendered raw (not escaped) — it's LLM-generated markup
-        svg_block = (
-            '<div style="margin-bottom: 12px; text-align: center;">'
-            + _current_svg
-            + '</div>'
-        )
+        style = VARIANT_STYLES.get(_current_variant_style, {})
+        artifact_key = style.get("artifact_key", "svg")
+        if artifact_key == "code":
+            # Code/stats/math artifact — render as preformatted text
+            artifact_block = (
+                '<pre style="margin-bottom: 12px; padding: 10px; background: #1e1e1e;'
+                ' color: #d4d4d4; border-radius: 6px; font-size: 0.9em;'
+                ' overflow-x: auto; font-family: monospace;">'
+                '<code>' + html.escape(_current_svg) + '</code></pre>'
+            )
+        else:
+            # SVG diagram — render raw
+            artifact_block = (
+                '<div style="margin-bottom: 12px; text-align: center;">'
+                + _current_svg
+                + '</div>'
+            )
     return f"""
     <div id="variant-question" style="
         position: relative;
@@ -1229,7 +1241,7 @@ def _wrap_variant_html(variant: str) -> str:
             margin-bottom: 8px;
             font-style: italic;
         ">&#128256; variant question</div>
-        {svg_block}
+        {artifact_block}
         <div>{safe_variant}</div>
     </div>
     """
@@ -2200,6 +2212,9 @@ def show_variant_style_dialog():
         "elaborative": "Elaborative — why/how questions, causal reasoning",
         "feynman": "Feynman — explain simply, clarity over precision",
         "real_world": "Real-World Examples — identify the concept from a real case",
+        "transfer_code": "Transfer: Code — debug, predict, or identify technique in a snippet",
+        "transfer_stats": "Transfer: Stats — interpret model output or diagnose assumptions",
+        "transfer_math": "Transfer: Math — find error or identify technique in an equation",
         "discrimination": "Discrimination — how does X differ from Y?",
         "cloze_generation": "Cloze Generation — fill-in-the-blank, produce the key term",
         "diagram_labeling": "Diagram Labeling — SVG diagram with blanks to identify (visual)",
