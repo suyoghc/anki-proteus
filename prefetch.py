@@ -37,13 +37,17 @@ class PrefetchWorker(QThread):
     def run(self):
         """Generate variant in background thread."""
         try:
-            variant = generate_variant(
+            result = generate_variant(
                 question=self._question,
                 answer=self._answer,
                 config=self._config,
             )
-            if variant:
-                self._cache.store_variant(self._card_id, variant)
-                self.finished.emit(self._card_id, variant)
+            if result:
+                self._cache.store_variant(
+                    self._card_id,
+                    result["question"],
+                    result.get("expected_answer", ""),
+                )
+                self.finished.emit(self._card_id, result["question"])
         except Exception as e:
             print(f"[Proteus] Prefetch failed: {e}")

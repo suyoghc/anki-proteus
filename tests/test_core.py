@@ -125,16 +125,17 @@ class TestVariantGeneration:
     def test_generate_variant_shortens_overlong_output(self, monkeypatch):
         """Overlong variants trigger one shorten pass."""
         calls = []
+        long_q = (
+            "What type of effects should be used for subject and item in a "
+            "hierarchical study design where you need to account for "
+            "correlations within groups and allow parameters to vary across "
+            "different levels of the data?"
+        )
 
         def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
             calls.append({"max_tokens": max_tokens, "system": system})
             if len(calls) == 1:
-                return (
-                    "What type of effects should be used for subject and item in a "
-                    "hierarchical study design where you need to account for "
-                    "correlations within groups and allow parameters to vary across "
-                    "different levels of the data?"
-                )
+                return json.dumps({"question": long_q, "expected_answer": "Use random effects"})
             return "Should subject and item be modeled as random effects in this study?"
 
         monkeypatch.setattr(generator, "_call_api", fake_call)
@@ -148,22 +149,24 @@ class TestVariantGeneration:
         assert len(calls) == 2
         assert calls[0]["max_tokens"] == 300
         assert calls[1]["max_tokens"] == 120
-        assert out == "Should subject and item be modeled as random effects in this study?"
-        assert len(out.split()) <= generator._MAX_VARIANT_WORDS
+        assert out["question"] == "Should subject and item be modeled as random effects in this study?"
+        assert len(out["question"].split()) <= generator._MAX_VARIANT_WORDS
+        assert out["expected_answer"] == "Use random effects"
 
     def test_generate_variant_hard_caps_when_shorten_fails(self, monkeypatch):
         """If shorten pass fails, variant is hard-capped to limits."""
         calls = []
+        long_q = (
+            "In this hierarchical design with repeated observations from many "
+            "subjects and items across several contextual groupings, what type "
+            "of effects should be used for subject and item if we need to "
+            "capture within-group correlations while allowing parameters to vary?"
+        )
 
         def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
             calls.append(max_tokens)
             if len(calls) == 1:
-                return (
-                    "In this hierarchical design with repeated observations from many "
-                    "subjects and items across several contextual groupings, what type "
-                    "of effects should be used for subject and item if we need to "
-                    "capture within-group correlations while allowing parameters to vary?"
-                )
+                return json.dumps({"question": long_q, "expected_answer": "Random effects"})
             return None
 
         monkeypatch.setattr(generator, "_call_api", fake_call)
@@ -176,9 +179,27 @@ class TestVariantGeneration:
 
         assert calls == [300, 120]
         assert out is not None
-        assert len(out.split()) <= generator._MAX_VARIANT_WORDS
-        assert len(out) <= generator._MAX_VARIANT_CHARS
-        assert out.endswith("?")
+        assert len(out["question"].split()) <= generator._MAX_VARIANT_WORDS
+        assert len(out["question"]) <= generator._MAX_VARIANT_CHARS
+        assert out["question"].endswith("?")
+        assert out["expected_answer"] == "Random effects"
+
+    def test_generate_variant_plain_text_fallback(self, monkeypatch):
+        """Non-JSON LLM output falls back to treating raw text as question."""
+
+        def fake_call(api_key, model, system, user_message, max_tokens=300, timeout_s=15):
+            return "What is a random effect?"
+
+        monkeypatch.setattr(generator, "_call_api", fake_call)
+
+        out = generator.generate_variant(
+            question="Q",
+            answer="A",
+            config={"api_key": "k", "model": "m"},
+        )
+
+        assert out["question"] == "What is a random effect?"
+        assert out["expected_answer"] == ""
 
 
 # ===========================================================================
@@ -442,12 +463,13 @@ class TestVariantCache:
         c.close()
 
     def test_store_and_retrieve(self, cache):
-        """Store a variant, get_variant returns (id, text), marks it used."""
-        cache.store_variant(1, "What is X?")
+        """Store a variant, get_variant returns (id, text, expected_answer), marks it used."""
+        cache.store_variant(1, "What is X?", "X is Y")
         result = cache.get_variant(1)
         assert result is not None
-        vid, text = result
+        vid, text, expected = result
         assert text == "What is X?"
+        assert expected == "X is Y"
         assert isinstance(vid, int)
         assert not cache.has_variant(1)
 
@@ -470,8 +492,8 @@ class TestVariantCache:
         cache.store_variant(1, "A")
         time.sleep(0.01)  # ensure different created_at
         cache.store_variant(1, "B")
-        _, text_a = cache.get_variant(1)
-        _, text_b = cache.get_variant(1)
+        _, text_a, _ = cache.get_variant(1)
+        _, text_b, _ = cache.get_variant(1)
         assert text_a == "A"
         assert text_b == "B"
 
@@ -486,7 +508,7 @@ class TestVariantCache:
     def test_record_feedback(self, cache):
         """Store variant, retrieve it, record thumbs-up, verify in DB."""
         cache.store_variant(1, "Variant Q")
-        vid, _ = cache.get_variant(1)
+        vid, _, _ = cache.get_variant(1)
         cache.record_feedback(vid, 1)
         with cache._lock:
             row = cache._conn.execute(
@@ -497,7 +519,7 @@ class TestVariantCache:
     def test_feedback_ignored_when_not_given(self, cache):
         """Variant with no feedback keeps rating as NULL."""
         cache.store_variant(1, "Variant Q")
-        vid, _ = cache.get_variant(1)
+        vid, _, _ = cache.get_variant(1)
         with cache._lock:
             row = cache._conn.execute(
                 "SELECT rating FROM variants WHERE id = ?", (vid,)

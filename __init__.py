@@ -81,6 +81,7 @@ _batch_manager: BatchPrefetchManager = None
 _current_variant: str = None          # variant being shown right now
 _current_variant_id: int = None       # DB row id for feedback
 _current_card_id: int = None
+_current_expected_answer: str = ""    # pre-fetched expected answer
 _user_response: str = ""              # captured from freeform text input
 _evaluation_text: str = None          # LLM grading result
 _grading_worker = None                # background grading QThread
@@ -306,7 +307,7 @@ def should_prefetch(card) -> bool:
 
 def on_card_will_show(text: str, card, kind: str) -> str:
     """Intercept card display. Replace question with variant if eligible."""
-    global _current_variant, _current_variant_id, _current_card_id
+    global _current_variant, _current_variant_id, _current_card_id, _current_expected_answer
     global _evaluation_text, _user_response
 
     try:
@@ -326,6 +327,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             _evaluation_text = None
             _current_variant = None
             _current_variant_id = None
+            _current_expected_answer = ""
             _user_response = ""
             _current_card_id = card.id
 
@@ -336,7 +338,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             result = _cache.get_variant(card.id)
 
             if result:
-                _current_variant_id, _current_variant = result
+                _current_variant_id, _current_variant, _current_expected_answer = result
                 styled_variant = _wrap_variant_html(_current_variant)
                 styled_variant += _feedback_buttons_html(card.id, _current_variant_id)
                 if CONFIG.get("response_mode") == "freeform":
@@ -1283,6 +1285,29 @@ def _feedback_buttons_html(card_id: int, variant_id: int) -> str:
     """ % (int(variant_id), int(variant_id), int(card_id), int(variant_id))
 
 
+def _prefilled_expected_answer_html() -> str:
+    """Return the expected-answer div, pre-filled from cache or hidden."""
+    if _current_expected_answer:
+        content = (
+            "<div style='margin-bottom: 4px; color: #666; font-size: 0.84em;'>"
+            "<b>AI answer target</b></div>"
+            "<div>" + html.escape(_current_expected_answer) + "</div>"
+        )
+        return (
+            '<div id="variant-expected-answer" style="'
+            'margin-top: 12px; padding: 10px 12px; background: #f8f9fa;'
+            ' border: 1px solid #dcdfe3; border-radius: 6px;'
+            ' font-size: 0.9em; line-height: 1.45;">'
+            + content + '</div>'
+        )
+    return (
+        '<div id="variant-expected-answer" style="display: none;'
+        ' margin-top: 12px; padding: 10px 12px; background: #f8f9fa;'
+        ' border: 1px solid #dcdfe3; border-radius: 6px;'
+        ' font-size: 0.9em; line-height: 1.45;"></div>'
+    )
+
+
 def _freeform_input_html() -> str:
     """HTML for the freeform text response area with inline grading placeholders."""
     return (
@@ -1304,11 +1329,8 @@ def _freeform_input_html() -> str:
         " this.disabled = true; this.style.opacity = '0.5';"
         '}"'
         '></textarea></div>'
-        # Placeholders for inline grading results (filled by JS when ready)
-        '<div id="variant-expected-answer" style="display: none;'
-        ' margin-top: 12px; padding: 10px 12px; background: #f8f9fa;'
-        ' border: 1px solid #dcdfe3; border-radius: 6px;'
-        ' font-size: 0.9em; line-height: 1.45;"></div>'
+        # Expected answer: pre-populated from cache if available, otherwise hidden placeholder
+        + _prefilled_expected_answer_html() +
         + (
             '<div id="variant-evaluation-header" style="display: none;'
             ' margin-top: 12px; margin-bottom: 4px; font-size: 0.84em;'
@@ -1470,11 +1492,14 @@ def _regenerate_idea_variant(idea, instruction, current_text):
     extra = "\n".join(extra_parts)
     cfg["system_prompt"] = f"{base}\n\n{extra}" if base else extra
 
-    return generate_variant(
+    result = generate_variant(
         question=str(idea.get("original_question", "")),
         answer=str(idea.get("original_answer", "")),
         config=cfg,
     )
+    if result:
+        return result["question"]
+    return None
 
 
 class _IdeaRegenerateWorker(QThread):
@@ -1550,7 +1575,7 @@ def _save_current_idea(card_id=None, variant_id=None):
         if target_variant_id is not None:
             row = _cache.get_variant_by_id(target_variant_id)
             if row:
-                db_card_id, db_variant_text, db_rating = row
+                db_card_id, db_variant_text, db_rating, _db_expected = row
                 target_card_id = int(db_card_id)
                 variant_text = str(db_variant_text or "")
                 rating = db_rating

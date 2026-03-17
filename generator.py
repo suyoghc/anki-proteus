@@ -102,7 +102,7 @@ def reset_usage():
 VARIANT_SYSTEM_PROMPT = """You are a question variant generator for a spaced repetition system.
 
 Your job: given an original flashcard (question + answer), generate a SINGLE new question
-that tests the SAME underlying concept but looks different.
+that tests the SAME underlying concept but looks different, plus a concise expected answer.
 
 Rules:
 - The new question must be answerable using the same knowledge as the original answer.
@@ -111,10 +111,16 @@ Rules:
   present an error to identify.
 - Do NOT make the question significantly harder or easier than the original.
 - Do NOT include the answer in your question.
-- Return ONLY the new question text. No preamble, no explanation, no labels.
-- Keep it concise — never longer than the original question.
+- Keep the question concise — never longer than the original question.
 - Communicate minimalistically, prioritizing clarity and engagement.
 - Use plain text (no markdown formatting).
+- The expected_answer should be a concise ideal answer to the variant question (max 28 words).
+
+Return a JSON object with exactly two keys:
+- "question": the new variant question text
+- "expected_answer": concise answer to the variant question
+
+Return ONLY the JSON object, no markdown fences.
 """
 
 VARIANT_USER_TEMPLATE = """Original question: {question}
@@ -190,11 +196,11 @@ def _hard_limit_variant(text: str) -> str:
     return variant
 
 
-def generate_variant(question: str, answer: str, config: dict) -> Optional[str]:
+def generate_variant(question: str, answer: str, config: dict) -> Optional[dict]:
     """
-    Generate a variant question via LLM.
+    Generate a variant question and expected answer via LLM.
 
-    Returns the variant text, or None on failure.
+    Returns {"question": str, "expected_answer": str} or None on failure.
     """
     api_key = config.get("api_key", "")
     if not api_key:
@@ -218,7 +224,15 @@ def generate_variant(question: str, answer: str, config: dict) -> Optional[str]:
     if not raw:
         return None
 
-    variant = _normalize_variant_text(raw)
+    # Parse JSON response; fall back to treating raw text as question only
+    expected_answer = ""
+    try:
+        parsed = json.loads(raw)
+        variant = _normalize_variant_text(str(parsed.get("question", "")))
+        expected_answer = str(parsed.get("expected_answer", "")).strip()
+    except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+        variant = _normalize_variant_text(raw)
+
     if not variant:
         return None
 
@@ -242,7 +256,10 @@ def generate_variant(question: str, answer: str, config: dict) -> Optional[str]:
     if _variant_too_long(variant):
         variant = _hard_limit_variant(variant)
 
-    return variant or None
+    if not variant:
+        return None
+
+    return {"question": variant, "expected_answer": expected_answer}
 
 
 # ---------------------------------------------------------------------------

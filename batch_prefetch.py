@@ -52,14 +52,18 @@ class _BatchWorker(QThread):
                 continue
 
             try:
-                variant = generate_variant(
+                result = generate_variant(
                     question=question,
                     answer=answer,
                     config=self._config,
                 )
-                if variant:
-                    self._cache.store_variant(card_id, variant)
-                    _log(f"worker: card {card_id} done ({len(variant)} chars)", self._debug)
+                if result:
+                    self._cache.store_variant(
+                        card_id,
+                        result["question"],
+                        result.get("expected_answer", ""),
+                    )
+                    _log(f"worker: card {card_id} done ({len(result['question'])} chars)", self._debug)
                 else:
                     _log(f"worker: card {card_id} generation returned None", self._debug)
             except Exception as e:
