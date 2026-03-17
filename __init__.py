@@ -2295,20 +2295,33 @@ def show_variant_style_dialog():
 
     btn_row = QHBoxLayout()
     save_btn = QPushButton("Save")
+    save_refresh_btn = QPushButton("Save and Refresh")
     cancel_btn = QPushButton("Cancel")
 
-    def on_save():
+    def _apply_selection():
         selected = [k for k, cb in checkboxes.items() if cb.isChecked()]
         if not selected:
             tooltip("Proteus: select at least one style")
-            return
+            return None
         CONFIG["variant_style"] = selected
-        tooltip(f"Proteus: {len(selected)} style{'s' if len(selected) != 1 else ''} active")
-        dlg.accept()
+        return selected
+
+    def on_save():
+        if _apply_selection() is not None:
+            tooltip(f"Proteus: styles saved")
+            dlg.accept()
+
+    def on_save_refresh():
+        selected = _apply_selection()
+        if selected is not None:
+            dlg.accept()
+            refresh_variant_cache()
 
     save_btn.clicked.connect(on_save)
+    save_refresh_btn.clicked.connect(on_save_refresh)
     cancel_btn.clicked.connect(dlg.reject)
     btn_row.addWidget(save_btn)
+    btn_row.addWidget(save_refresh_btn)
     btn_row.addWidget(cancel_btn)
     layout.addLayout(btn_row)
 
