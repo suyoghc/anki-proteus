@@ -2289,8 +2289,8 @@ def show_variant_style_dialog():
     current_set = set(current)
 
     style_groups = [
-        ("Core", ["wozniak_matuschak", "bloom", "elaborative", "feynman"]),
-        ("Contrast & Recall", ["discrimination", "cloze_generation", "real_world"]),
+        ("Core", ["wozniak_matuschak", "bloom", "elaborative", "feynman", "cloze_generation"]),
+        ("Contrast & Context", ["discrimination", "real_world"]),
         ("Transfer", ["transfer_code", "transfer_stats", "transfer_math"]),
         ("Visual", ["diagram_labeling"]),
     ]
