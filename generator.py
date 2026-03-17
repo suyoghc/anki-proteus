@@ -113,8 +113,10 @@ Rules:
 - Do NOT include the answer in your question.
 - Keep the question concise — never longer than the original question.
 - Communicate minimalistically, prioritizing clarity and engagement.
+- Use short, direct sentences. No subordinate clauses. No filler words.
 - Use plain text (no markdown formatting).
 - The expected_answer should be a concise ideal answer to the variant question (max 28 words).
+  Use short, direct sentences. No subordinate clauses. No filler words.
 
 Return a JSON object with exactly two keys:
 - "question": the new variant question text
