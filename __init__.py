@@ -85,6 +85,7 @@ _current_variant_id: int = None       # DB row id for feedback
 _current_card_id: int = None
 _current_expected_answer: str = ""    # pre-fetched expected answer
 _current_variant_style: str = ""     # style used for the current variant
+_current_svg: str = ""               # SVG markup for visual styles
 _user_response: str = ""              # captured from freeform text input
 _evaluation_text: str = None          # LLM grading result
 _grading_worker = None                # background grading QThread
@@ -274,7 +275,7 @@ def should_prefetch(card) -> bool:
 def on_card_will_show(text: str, card, kind: str) -> str:
     """Intercept card display. Replace question with variant if eligible."""
     global _current_variant, _current_variant_id, _current_card_id
-    global _current_expected_answer, _current_variant_style
+    global _current_expected_answer, _current_variant_style, _current_svg
     global _evaluation_text, _user_response
 
     try:
@@ -296,6 +297,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             _current_variant_id = None
             _current_expected_answer = ""
             _current_variant_style = ""
+            _current_svg = ""
             _user_response = ""
             _current_card_id = card.id
 
@@ -306,7 +308,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             result = _cache.get_variant(card.id)
 
             if result:
-                _current_variant_id, _current_variant, _current_expected_answer, _current_variant_style = result
+                _current_variant_id, _current_variant, _current_expected_answer, _current_variant_style, _current_svg = result
                 styled_variant = _wrap_variant_html(_current_variant)
                 styled_variant += _feedback_buttons_html(card.id, _current_variant_id)
                 if CONFIG.get("response_mode") == "freeform":
@@ -1206,8 +1208,16 @@ def _cancel_batch_prefetch():
 
 
 def _wrap_variant_html(variant: str) -> str:
-    """Wrap variant question in styled HTML."""
+    """Wrap variant question in styled HTML. Renders SVG if present."""
     safe_variant = html.escape(variant)
+    svg_block = ""
+    if _current_svg:
+        # SVG is rendered raw (not escaped) — it's LLM-generated markup
+        svg_block = (
+            '<div style="margin-bottom: 12px; text-align: center;">'
+            + _current_svg
+            + '</div>'
+        )
     return f"""
     <div id="variant-question" style="
         position: relative;
@@ -1219,6 +1229,7 @@ def _wrap_variant_html(variant: str) -> str:
             margin-bottom: 8px;
             font-style: italic;
         ">&#128256; variant question</div>
+        {svg_block}
         <div>{safe_variant}</div>
     </div>
     """
@@ -2189,6 +2200,7 @@ def show_variant_style_dialog():
         "elaborative": "Elaborative — why/how questions, causal reasoning",
         "feynman": "Feynman — explain simply, clarity over precision",
         "discrimination": "Discrimination — how does X differ from Y?",
+        "diagram_labeling": "Diagram Labeling — SVG diagram with blanks to identify (visual)",
     }
 
     dlg = QDialog(mw)

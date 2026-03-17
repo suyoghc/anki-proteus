@@ -106,6 +106,14 @@ Return a JSON object with exactly two keys:
 
 Return ONLY the JSON object, no markdown fences."""
 
+_VARIANT_VISUAL_JSON_FOOTER = """
+Return a JSON object with exactly three keys:
+- "svg": an inline SVG diagram (simple shapes, text labels, under 2KB)
+- "question": a short text prompt referencing the diagram (e.g., "Label parts A, B, C")
+- "expected_answer": the correct labels/answers
+
+Return ONLY the JSON object, no markdown fences."""
+
 _VARIANT_SHARED_STYLE = """
 Style rules:
 - Do NOT include the answer in your question.
@@ -227,6 +235,32 @@ VARIANT_STYLES = {
         "max_words": 30,
         "max_chars": 210,
         "grading_addendum": "Evaluate whether the response correctly identifies the distinguishing boundary between the concepts.",
+    },
+    "diagram_labeling": {
+        "system_prompt": (
+            "You are a visual flashcard generator for a spaced repetition system.\n\n"
+            "Your job: given an original flashcard (question + answer), create an SVG diagram\n"
+            "with labeled blanks (A, B, C, etc.) and a question asking the learner to identify them.\n\n"
+            "SVG rules:\n"
+            "- Simple shapes only: rect, circle, line, text, path. Under 2KB.\n"
+            "- Use viewBox='0 0 400 250' for consistent sizing.\n"
+            "- Monochrome: black strokes (#333), light gray fills (#f0f0f0), white background.\n"
+            "- Mark blanks with bold letters (A, B, C) in red (#d32f2f).\n"
+            "- No external references (fonts, images). Everything inline.\n"
+            "- The diagram must be meaningful — not decorative.\n\n"
+            "Question rules:\n"
+            "- The text question should reference the diagram: 'Identify parts A, B, C.'\n"
+            "- Test the SAME concept as the original flashcard.\n"
+            + _VARIANT_SHARED_STYLE
+            + "\n\nExpected answer rules:\n"
+            "- List each label with its correct answer: 'A = ..., B = ..., C = ...'\n"
+            "- Max 3-4 labels per diagram.\n"
+            + _VARIANT_VISUAL_JSON_FOOTER
+        ),
+        "max_words": 30,
+        "max_chars": 210,
+        "grading_addendum": "The learner was shown a labeled diagram. Evaluate whether they correctly identified each labeled part. Partial credit for getting some labels right.",
+        "visual": True,
     },
 }
 
@@ -350,55 +384,65 @@ def generate_variant(question: str, answer: str, config: dict,
         domain_context=domain_ctx,
     )
 
-    raw = _call_api(api_key, model, system, user_msg, max_tokens=300)
+    is_visual = style.get("visual", False)
+    api_max_tokens = 800 if is_visual else 300
+
+    raw = _call_api(api_key, model, system, user_msg, max_tokens=api_max_tokens)
     if not raw:
         return None
 
     # Parse JSON response; fall back to treating raw text as question only
     expected_answer = ""
+    svg = ""
     try:
         parsed = json.loads(raw)
         variant = _normalize_variant_text(str(parsed.get("question", "")))
         expected_answer = str(parsed.get("expected_answer", "")).strip()
+        if is_visual:
+            svg = str(parsed.get("svg", "")).strip()
     except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
         variant = _normalize_variant_text(raw)
 
     if not variant:
         return None
 
-    # One shorten pass for overlong generations before hard-capping.
-    if _variant_too_long(variant, max_words, max_chars):
-        shorten_system = (
-            "You shorten flashcard questions while preserving the tested concept.\n\n"
-            "Rules:\n"
-            "- Keep the same answer target as the original.\n"
-            "- Keep one clear ask only.\n"
-            "- Keep wording plain and concrete.\n"
-            f"- Output must be <= {max_words} words and <= {max_chars} characters.\n"
-            "- Return ONLY the rewritten question text."
-        )
-        shorten_user_msg = _VARIANT_SHORTEN_TEMPLATE.format(
-            question=question,
-            answer=answer,
-            variant=variant,
-        )
-        shortened = _call_api(
-            api_key, model, shorten_system, shorten_user_msg, max_tokens=120,
-        )
-        if shortened:
-            variant = _normalize_variant_text(shortened)
+    # Length enforcement (skip for visual styles — SVG is the main content)
+    if not is_visual:
+        if _variant_too_long(variant, max_words, max_chars):
+            shorten_system = (
+                "You shorten flashcard questions while preserving the tested concept.\n\n"
+                "Rules:\n"
+                "- Keep the same answer target as the original.\n"
+                "- Keep one clear ask only.\n"
+                "- Keep wording plain and concrete.\n"
+                f"- Output must be <= {max_words} words and <= {max_chars} characters.\n"
+                "- Return ONLY the rewritten question text."
+            )
+            shorten_user_msg = _VARIANT_SHORTEN_TEMPLATE.format(
+                question=question,
+                answer=answer,
+                variant=variant,
+            )
+            shortened = _call_api(
+                api_key, model, shorten_system, shorten_user_msg, max_tokens=120,
+            )
+            if shortened:
+                variant = _normalize_variant_text(shortened)
 
-    if _variant_too_long(variant, max_words, max_chars):
-        variant = _hard_limit_variant(variant, max_words, max_chars)
+        if _variant_too_long(variant, max_words, max_chars):
+            variant = _hard_limit_variant(variant, max_words, max_chars)
 
     if not variant:
         return None
 
-    return {
+    result = {
         "question": variant,
         "expected_answer": expected_answer,
         "variant_style": style_name,
     }
+    if svg:
+        result["svg"] = svg
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -64,6 +64,7 @@ class _BatchWorker(QThread):
                         result["question"],
                         result.get("expected_answer", ""),
                         result.get("variant_style", ""),
+                        result.get("svg", ""),
                     )
                     _log(f"worker: card {card_id} done ({len(result['question'])} chars)", self._debug)
                 else:

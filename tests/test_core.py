@@ -467,7 +467,7 @@ class TestVariantCache:
         cache.store_variant(1, "What is X?", "X is Y")
         result = cache.get_variant(1)
         assert result is not None
-        vid, text, expected, _style = result
+        vid, text, expected, _style, _svg = result
         assert text == "What is X?"
         assert expected == "X is Y"
         assert isinstance(vid, int)
@@ -492,8 +492,8 @@ class TestVariantCache:
         cache.store_variant(1, "A")
         time.sleep(0.01)  # ensure different created_at
         cache.store_variant(1, "B")
-        _, text_a, _, _ = cache.get_variant(1)
-        _, text_b, _, _ = cache.get_variant(1)
+        _, text_a, _, _, _ = cache.get_variant(1)
+        _, text_b, _, _, _ = cache.get_variant(1)
         assert text_a == "A"
         assert text_b == "B"
 
@@ -508,7 +508,7 @@ class TestVariantCache:
     def test_record_feedback(self, cache):
         """Store variant, retrieve it, record thumbs-up, verify in DB."""
         cache.store_variant(1, "Variant Q")
-        vid, _, _, _ = cache.get_variant(1)
+        vid, _, _, _, _ = cache.get_variant(1)
         cache.record_feedback(vid, 1)
         with cache._lock:
             row = cache._conn.execute(
@@ -519,7 +519,7 @@ class TestVariantCache:
     def test_feedback_ignored_when_not_given(self, cache):
         """Variant with no feedback keeps rating as NULL."""
         cache.store_variant(1, "Variant Q")
-        vid, _, _, _ = cache.get_variant(1)
+        vid, _, _, _, _ = cache.get_variant(1)
         with cache._lock:
             row = cache._conn.execute(
                 "SELECT rating FROM variants WHERE id = ?", (vid,)

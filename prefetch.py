@@ -51,6 +51,7 @@ class PrefetchWorker(QThread):
                     result["question"],
                     result.get("expected_answer", ""),
                     result.get("variant_style", ""),
+                    result.get("svg", ""),
                 )
                 self.finished.emit(self._card_id, result["question"])
         except Exception as e:
