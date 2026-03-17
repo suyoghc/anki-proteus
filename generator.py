@@ -118,7 +118,7 @@ Style rules:
 # ---------------------------------------------------------------------------
 
 VARIANT_STYLES = {
-    "wozniak": {
+    "wozniak_matuschak": {
         "system_prompt": (
             "You are a question variant generator for a spaced repetition system.\n\n"
             "Your job: given an original flashcard (question + answer), generate a SINGLE new question\n"
@@ -228,7 +228,7 @@ VARIANT_STYLES = {
 }
 
 # Keep module-level constants for backward compat (tests, shorten pass default)
-VARIANT_SYSTEM_PROMPT = VARIANT_STYLES["wozniak"]["system_prompt"]
+VARIANT_SYSTEM_PROMPT = VARIANT_STYLES["wozniak_matuschak"]["system_prompt"]
 _MAX_VARIANT_WORDS = 26
 _MAX_VARIANT_CHARS = 180
 
@@ -321,11 +321,11 @@ def generate_variant(question: str, answer: str, config: dict,
     model = config.get("model", DEFAULT_MODEL)
 
     # Pick a style
-    style_cfg = config.get("variant_style", ["wozniak"])
+    style_cfg = config.get("variant_style", ["wozniak_matuschak"])
     if isinstance(style_cfg, str):
         style_cfg = [style_cfg]
-    style_name = _rand.choice(style_cfg) if style_cfg else "wozniak"
-    style = VARIANT_STYLES.get(style_name, VARIANT_STYLES["wozniak"])
+    style_name = _rand.choice(style_cfg) if style_cfg else "wozniak_matuschak"
+    style = VARIANT_STYLES.get(style_name, VARIANT_STYLES["wozniak_matuschak"])
 
     max_words = style["max_words"]
     max_chars = style["max_chars"]
@@ -847,10 +847,10 @@ def grade_response(
         )
 
     # Append style-specific grading guidance
-    variant_style = str(config.get("_variant_style", config.get("variant_style", "wozniak")))
+    variant_style = str(config.get("_variant_style", config.get("variant_style", "wozniak_matuschak")))
     if isinstance(variant_style, list):
-        variant_style = variant_style[0] if variant_style else "wozniak"
-    style = VARIANT_STYLES.get(variant_style, VARIANT_STYLES["wozniak"])
+        variant_style = variant_style[0] if variant_style else "wozniak_matuschak"
+    style = VARIANT_STYLES.get(variant_style, VARIANT_STYLES["wozniak_matuschak"])
     addendum = style.get("grading_addendum", "")
     if addendum:
         if variant_style == "bloom":

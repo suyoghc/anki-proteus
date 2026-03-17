@@ -62,7 +62,7 @@ def load_config():
         "grading_model": "",               # optional override for grading model
         "grading_max_tokens": 280,         # room for full grading schema
         "grading_timeout_s": 10,           # fail fast if grading is slow
-        "variant_style": ["wozniak"],       # list of styles to sample from
+        "variant_style": ["wozniak_matuschak"],       # list of styles to sample from
         "feedback_mode": "both",           # "ai", "canonical", or "both"
         "show_ai_coverage": False,         # show AI coverage donut on question side
     }
@@ -2066,7 +2066,7 @@ def show_variant_style_dialog():
     from .generator import VARIANT_STYLES
 
     style_labels = {
-        "wozniak": "Wozniak — minimum info, one concept, unambiguous",
+        "wozniak_matuschak": "Wozniak + Matuschak — minimum info, retrieval-focused, unambiguous",
         "bloom": "Bloom's Taxonomy — cognitive level scales with card maturity",
         "elaborative": "Elaborative — why/how questions, causal reasoning",
         "feynman": "Feynman — explain simply, clarity over precision",
@@ -2084,7 +2084,7 @@ def show_variant_style_dialog():
         "Each card randomly gets one of the selected styles.</span>"
     ))
 
-    current = CONFIG.get("variant_style", ["wozniak"])
+    current = CONFIG.get("variant_style", ["wozniak_matuschak"])
     if isinstance(current, str):
         current = [current]
     current_set = set(current)
