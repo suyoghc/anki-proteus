@@ -1246,25 +1246,20 @@ def _feedback_buttons_html(card_id: int, variant_id: int) -> str:
 
 
 def _prefilled_expected_answer_html() -> str:
-    """Return the expected-answer div, pre-filled from cache or hidden."""
+    """Return the expected-answer div, pre-filled from cache but hidden until grading fires."""
+    content = ""
     if _current_expected_answer:
         content = (
             "<div style='margin-bottom: 4px; color: #666; font-size: 0.84em;'>"
             "<b>AI answer target</b></div>"
             "<div>" + html.escape(_current_expected_answer) + "</div>"
         )
-        return (
-            '<div id="variant-expected-answer" style="'
-            'margin-top: 12px; padding: 10px 12px; background: #f8f9fa;'
-            ' border: 1px solid #dcdfe3; border-radius: 6px;'
-            ' font-size: 0.9em; line-height: 1.45;">'
-            + content + '</div>'
-        )
     return (
         '<div id="variant-expected-answer" style="display: none;'
         ' margin-top: 12px; padding: 10px 12px; background: #f8f9fa;'
         ' border: 1px solid #dcdfe3; border-radius: 6px;'
-        ' font-size: 0.9em; line-height: 1.45;"></div>'
+        ' font-size: 0.9em; line-height: 1.45;">'
+        + content + '</div>'
     )
 
 
