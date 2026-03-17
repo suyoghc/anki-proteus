@@ -385,7 +385,7 @@ def generate_variant(question: str, answer: str, config: dict,
     )
 
     is_visual = style.get("visual", False)
-    api_max_tokens = 800 if is_visual else 300
+    api_max_tokens = 1200 if is_visual else 300
 
     raw = _call_api(api_key, model, system, user_msg, max_tokens=api_max_tokens)
     if not raw:
@@ -401,9 +401,14 @@ def generate_variant(question: str, answer: str, config: dict,
         if is_visual:
             svg = str(parsed.get("svg", "")).strip()
     except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+        if is_visual:
+            # Visual styles require valid JSON with svg field — no fallback
+            return None
         variant = _normalize_variant_text(raw)
 
     if not variant:
+        return None
+    if is_visual and not svg:
         return None
 
     # Length enforcement (skip for visual styles — SVG is the main content)
