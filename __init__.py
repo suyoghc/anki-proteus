@@ -122,6 +122,9 @@ def init_addon():
     a = menu.addAction("Usage Stats")
     a.triggered.connect(show_usage_dialog)
 
+    a = menu.addAction("Variant Styles...")
+    a.triggered.connect(show_variant_style_dialog)
+
     a = menu.addAction("Refresh Variant Cache")
     a.triggered.connect(refresh_variant_cache)
 
@@ -2055,6 +2058,65 @@ def _budget_bar_text(pct: int) -> str:
         f"<code><span style='color: {color};'>{bar}</span></code> "
         f"<b>{pct}%</b> of budget"
     )
+
+
+def show_variant_style_dialog():
+    """Show a dialog with checkboxes to pick active variant styles."""
+    from aqt.qt import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox
+    from .generator import VARIANT_STYLES
+
+    style_labels = {
+        "wozniak": "Wozniak — minimum info, one concept, unambiguous",
+        "bloom": "Bloom's Taxonomy — cognitive level scales with card maturity",
+        "elaborative": "Elaborative — why/how questions, causal reasoning",
+        "feynman": "Feynman — explain simply, clarity over precision",
+        "discrimination": "Discrimination — how does X differ from Y?",
+    }
+
+    dlg = QDialog(mw)
+    dlg.setWindowTitle("Proteus: Variant Styles")
+    dlg.setMinimumWidth(420)
+    layout = QVBoxLayout()
+
+    layout.addWidget(QLabel(
+        "<b>Select variant styles</b><br>"
+        "<span style='color: #666; font-size: 0.9em;'>"
+        "Each card randomly gets one of the selected styles.</span>"
+    ))
+
+    current = CONFIG.get("variant_style", ["wozniak"])
+    if isinstance(current, str):
+        current = [current]
+    current_set = set(current)
+
+    checkboxes = {}
+    for key in VARIANT_STYLES:
+        cb = QCheckBox(style_labels.get(key, key))
+        cb.setChecked(key in current_set)
+        checkboxes[key] = cb
+        layout.addWidget(cb)
+
+    btn_row = QHBoxLayout()
+    save_btn = QPushButton("Save")
+    cancel_btn = QPushButton("Cancel")
+
+    def on_save():
+        selected = [k for k, cb in checkboxes.items() if cb.isChecked()]
+        if not selected:
+            tooltip("Proteus: select at least one style")
+            return
+        CONFIG["variant_style"] = selected
+        tooltip(f"Proteus: {len(selected)} style{'s' if len(selected) != 1 else ''} active")
+        dlg.accept()
+
+    save_btn.clicked.connect(on_save)
+    cancel_btn.clicked.connect(dlg.reject)
+    btn_row.addWidget(save_btn)
+    btn_row.addWidget(cancel_btn)
+    layout.addLayout(btn_row)
+
+    dlg.setLayout(layout)
+    dlg.exec()
 
 
 def refresh_variant_cache():
