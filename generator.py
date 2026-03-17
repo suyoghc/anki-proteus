@@ -110,7 +110,8 @@ _VARIANT_SHARED_STYLE = """
 Style rules:
 - Do NOT include the answer in your question.
 - Get to the point immediately. No preamble, no setup, no "In the context of...".
-- Use short, direct sentences. No subordinate clauses. No filler words.
+- Each sentence must be under 12 words. Break longer thoughts into separate sentences.
+- No subordinate clauses. No filler words. No jargon-heavy compound phrases.
 - Use plain text (no markdown formatting)."""
 
 # ---------------------------------------------------------------------------
