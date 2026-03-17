@@ -33,7 +33,6 @@ Toggle between modes anytime with **Ctrl+Shift+V** (Cmd+Shift+V on macOS) or in 
 - **Human-in-the-loop editing**: In the Card Ideas dialog, edit draft wording, apply reason tags, and regenerate with targeted instructions (`Shorter`, `More Concrete`, `Less Jargon`, `Add Contrast Case`) before accepting/rejecting
 - **Feedback-gated creation**: `Create Card` is enabled only for ideas that include freeform grading feedback (from Wispr/typed response)
 - **Quick master toggle**: `Ctrl+Shift+P` (Cmd+Shift+P on macOS) toggles Proteus variant generation on/off for the current session
-- **Variant peek after answer**: `Ctrl+Shift+B` (Cmd+Shift+B on macOS) toggles an inline panel that re-shows the variant prompt (and your captured response)
 - **Back to question**: `Ctrl+Shift+Left` (Cmd+Shift+Left on macOS) navigates from the answer side back to the question side with freeform state preserved
 - **Usage budget**: Set a dollar cap to limit API spend per session
 - **Image card safety**: Automatically skips cards with insufficient text (e.g., Image Occlusion)
@@ -45,7 +44,6 @@ Toggle between modes anytime with **Ctrl+Shift+V** (Cmd+Shift+V on macOS) or in 
 
 - **Proteus on/off**: `Ctrl+Shift+P` (Cmd+Shift+P on macOS) toggles variant generation for the current session.
 - **Review mode**: `Ctrl+Shift+V` (Cmd+Shift+V on macOS) toggles `flip` vs `freeform`.
-- **Answer-side variant peek**: `Ctrl+Shift+B` (Cmd+Shift+B on macOS) toggles the variant prompt panel after `Show Answer`.
 - **Back to question**: `Ctrl+Shift+Left` (Cmd+Shift+Left on macOS) navigates from the answer side back to the question side with freeform state preserved.
 
 ### 2) Which cards can get a variant
@@ -226,7 +224,6 @@ Pre-fetching and caching minimize live API calls during review.
 
 - **Ctrl+Shift+P**: Toggle Proteus generation on/off (`Cmd+Shift+P` on macOS)
 - **Ctrl+Shift+V**: Toggle flip/freeform mode (`Cmd+Shift+V` on macOS)
-- **Ctrl+Shift+B**: Toggle answer-side variant peek (`Cmd+Shift+B` on macOS)
 - **Ctrl+Shift+Left**: Back to question from answer side (`Cmd+Shift+Left` on macOS)
 - **Enter** (in freeform textarea): Submit response and start grading (no auto-flip)
 

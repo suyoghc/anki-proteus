@@ -132,10 +132,6 @@ def init_addon():
     a.setShortcut("Ctrl+Shift+V")
     a.triggered.connect(toggle_response_mode)
 
-    a = menu.addAction("Variant Peek\tCtrl+Shift+B")
-    a.setShortcut("Ctrl+Shift+B")
-    a.triggered.connect(toggle_variant_peek)
-
     a = menu.addAction("Back to Question\tCtrl+Shift+Left")
     a.setShortcut("Ctrl+Shift+Left")
     a.triggered.connect(go_back_to_question)
@@ -187,34 +183,6 @@ def toggle_proteus_enabled():
         tooltip("Proteus: disabled")
         _cancel_batch_prefetch()
 
-
-def toggle_variant_peek():
-    # type: () -> None
-    """Toggle the inline variant-question peek panel on the answer side."""
-    if not mw.reviewer or not mw.reviewer.web:
-        return
-    if not _current_variant:
-        tooltip("Proteus: no active variant on this card")
-        return
-
-    reviewer_state = str(getattr(mw.reviewer, "state", "") or "")
-    if reviewer_state != "answer":
-        tooltip("Proteus: variant peek is available after Show Answer")
-        return
-
-    mw.reviewer.web.eval(
-        """
-        (function() {
-            var panel = document.getElementById('proteus-variant-peek');
-            if (!panel) { return; }
-            var visible = panel.style.display !== 'none';
-            panel.style.display = visible ? 'none' : 'block';
-            if (!visible && panel.scrollIntoView) {
-                panel.scrollIntoView({behavior: 'smooth', block: 'start'});
-            }
-        })();
-        """
-    )
 
 
 _returning_to_question = False  # flag to preserve state on re-show
@@ -341,7 +309,6 @@ def on_card_will_show(text: str, card, kind: str) -> str:
 
         elif kind.endswith("Answer"):
             if _current_variant and _current_variant_id is not None:
-                peek_panel = _variant_peek_html()
                 eval_html = ""
                 if CONFIG.get("response_mode") == "freeform" and _user_response.strip():
                     eval_rendered = _render_saved_evaluation()
@@ -360,7 +327,6 @@ def on_card_will_show(text: str, card, kind: str) -> str:
                     eval_html
                     + text
                     + _feedback_buttons_html(card.id, _current_variant_id)
-                    + peek_panel
                 )
 
             return text
@@ -1358,30 +1324,6 @@ def _freeform_input_html() -> str:
     )
 
 
-
-def _variant_peek_html() -> str:
-    """Hidden answer-side panel that can re-show the variant prompt on demand."""
-    variant = html.escape(str(_current_variant or ""))
-    response = html.escape(str(_user_response or "").strip())
-    response_html = ""
-    if response:
-        response_html = (
-            "<div style='margin-top: 8px; color: #666; font-size: 0.85em;'>"
-            "<b>Your response:</b> "
-            + response
-            + "</div>"
-        )
-    return (
-        '<div id="proteus-variant-peek" style="display: none; margin-top: 12px;'
-        ' margin-bottom: 8px; padding: 10px 12px; background: #fafafa;'
-        ' border: 1px solid #e6e6e6; border-radius: 6px; font-size: 0.9em; line-height: 1.5;">'
-        "<div style='color: #666; font-size: 0.85em; margin-bottom: 6px;'>"
-        "<b>Variant prompt (peek)</b>"
-        "</div>"
-        "<div>" + variant + "</div>"
-        + response_html +
-        "</div>"
-    )
 
 
 # ---------------------------------------------------------------------------
