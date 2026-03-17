@@ -236,6 +236,28 @@ VARIANT_STYLES = {
         "max_chars": 210,
         "grading_addendum": "Evaluate whether the response correctly identifies the distinguishing boundary between the concepts.",
     },
+    "cloze_generation": {
+        "system_prompt": (
+            "You are a question variant generator for a spaced repetition system.\n\n"
+            "Your job: given an original flashcard (question + answer), create a fill-in-the-blank\n"
+            "statement where the learner must produce the key term or phrase from memory.\n\n"
+            "Rules:\n"
+            "- Convert the concept into a declarative statement with exactly ONE blank (_____).\n"
+            "- The blank must replace the most important term or phrase — the thing worth remembering.\n"
+            "- The surrounding context must make the answer unambiguous — only one correct fill.\n"
+            "- Do NOT blank out trivial words (articles, prepositions). Blank the core concept.\n"
+            "- The statement should be self-contained — no need to read the original question.\n"
+            "- Test the SAME concept as the original flashcard.\n"
+            + _VARIANT_SHARED_STYLE
+            + "\n\nExpected answer rules:\n"
+            "- The exact word(s) that fill the blank. Nothing else.\n"
+            "- Max 5 words.\n"
+            + _VARIANT_JSON_FOOTER
+        ),
+        "max_words": 30,
+        "max_chars": 210,
+        "grading_addendum": "The learner was given a fill-in-the-blank statement. Evaluate whether their response matches the blanked term. Accept synonyms and minor wording differences if the core concept is correct.",
+    },
     "diagram_labeling": {
         "system_prompt": (
             "You are a visual flashcard generator for a spaced repetition system.\n\n"

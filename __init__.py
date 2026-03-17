@@ -2200,6 +2200,7 @@ def show_variant_style_dialog():
         "elaborative": "Elaborative — why/how questions, causal reasoning",
         "feynman": "Feynman — explain simply, clarity over precision",
         "discrimination": "Discrimination — how does X differ from Y?",
+        "cloze_generation": "Cloze Generation — fill-in-the-blank, produce the key term",
         "diagram_labeling": "Diagram Labeling — SVG diagram with blanks to identify (visual)",
     }
 
