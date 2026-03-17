@@ -113,9 +113,6 @@ def init_addon():
     menu = QMenu("Proteus", mw)
     mw.form.menuTools.addMenu(menu)
 
-    a = menu.addAction("Settings")
-    a.triggered.connect(show_config_dialog)
-
     a = menu.addAction("Card Ideas")
     a.triggered.connect(show_card_ideas_dialog)
 
