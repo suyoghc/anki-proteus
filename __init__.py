@@ -1028,6 +1028,10 @@ def on_js_message(handled: tuple, message: str, context):
         _open_add_note_blank()
         return (True, None)
 
+    if message == "captureVariantCard":
+        _open_add_note_from_variant()
+        return (True, None)
+
     if message == "startGrading":
         _start_early_grading()
         return (True, None)
@@ -1273,6 +1277,17 @@ def _feedback_buttons_html(card_id: int, variant_id: int) -> str:
             background: none; border: none; cursor: pointer;
             font-size: 1.3em; opacity: 0.5; padding: 2px 6px;
         " title="Add new card">&#10133;</button>
+        <button id="vf-capture" onclick="
+            try {
+                pycmd('captureVariantCard');
+                var btn = document.getElementById('vf-capture');
+                btn.textContent = '\\u2713';
+                btn.disabled = true;
+            } catch(e) {}
+        " style="
+            background: none; border: none; cursor: pointer;
+            font-size: 1.3em; opacity: 0.5; padding: 2px 6px;
+        " title="Create card from variant Q+A">&#128203;</button>
     </div>
     """ % (int(variant_id), int(variant_id), int(card_id), int(variant_id))
 
@@ -2012,6 +2027,30 @@ def show_card_ideas_dialog():
         dlg.exec()
     except Exception as e:
         showInfo(f"Proteus: card ideas dialog error: {e}")
+
+
+def _open_add_note_from_variant():
+    """Open Add Note pre-filled with the current variant question and AI answer target."""
+    try:
+        from aqt.addcards import AddCards
+
+        front = _current_variant or ""
+        back = _current_expected_answer or ""
+        if not front:
+            tooltip("Proteus: no active variant")
+            return
+
+        add_dlg = AddCards(mw)
+        try:
+            note = add_dlg.editor.note
+            if note and len(note.fields) >= 2:
+                note.fields[0] = front
+                note.fields[1] = back
+                add_dlg.editor.loadNote()
+        except Exception:
+            pass
+    except Exception as e:
+        showInfo(f"Proteus: could not open Add Note: {e}")
 
 
 def _open_add_note_blank():
