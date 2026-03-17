@@ -17,7 +17,7 @@ import re
 import time as _time
 from aqt import mw, gui_hooks
 from aqt.utils import showInfo, tooltip
-from aqt.qt import QAction, QThread, pyqtSignal, QObject
+from aqt.qt import QAction, QMenu, QThread, pyqtSignal, QObject
 from aqt.webview import AnkiWebView
 
 from .generator import (
@@ -109,44 +109,36 @@ def init_addon():
     gui_hooks.webview_did_receive_js_message.append(on_js_message)
     gui_hooks.state_did_change.append(on_state_did_change)
 
-    # Add config menu item
-    action = QAction("Proteus Settings", mw)
-    action.triggered.connect(show_config_dialog)
-    mw.form.menuTools.addAction(action)
+    # Proteus submenu under Tools
+    menu = QMenu("Proteus", mw)
+    mw.form.menuTools.addMenu(menu)
 
-    # Add toggle shortcut (Ctrl+Shift+V to toggle response mode)
-    toggle_action = QAction("Toggle Variant Response Mode", mw)
-    toggle_action.setShortcut("Ctrl+Shift+V")
-    toggle_action.triggered.connect(toggle_response_mode)
-    mw.form.menuTools.addAction(toggle_action)
+    a = menu.addAction("Settings")
+    a.triggered.connect(show_config_dialog)
 
-    # Add master on/off toggle shortcut (Cmd/Ctrl+Shift+P)
-    enabled_action = QAction("Toggle Proteus On/Off", mw)
-    enabled_action.setShortcut("Ctrl+Shift+P")
-    enabled_action.triggered.connect(toggle_proteus_enabled)
-    mw.form.menuTools.addAction(enabled_action)
+    a = menu.addAction("Card Ideas")
+    a.triggered.connect(show_card_ideas_dialog)
 
-    # Add answer-side variant peek shortcut (Cmd/Ctrl+Shift+B)
-    peek_action = QAction("Toggle Variant Peek (After Answer)", mw)
-    peek_action.setShortcut("Ctrl+Shift+B")
-    peek_action.triggered.connect(toggle_variant_peek)
-    mw.form.menuTools.addAction(peek_action)
+    a = menu.addAction("Usage Stats")
+    a.triggered.connect(show_usage_dialog)
 
-    # Add back-to-question shortcut (Cmd/Ctrl+Shift+Left)
-    back_action = QAction("Back to Question", mw)
-    back_action.setShortcut("Ctrl+Shift+Left")
-    back_action.triggered.connect(go_back_to_question)
-    mw.form.menuTools.addAction(back_action)
+    menu.addSeparator()
 
-    # Add usage stats menu item
-    usage_action = QAction("Proteus Usage Stats", mw)
-    usage_action.triggered.connect(show_usage_dialog)
-    mw.form.menuTools.addAction(usage_action)
+    a = menu.addAction("Toggle On/Off\tCtrl+Shift+P")
+    a.setShortcut("Ctrl+Shift+P")
+    a.triggered.connect(toggle_proteus_enabled)
 
-    # Add card ideas menu item
-    ideas_action = QAction("Proteus: Card Ideas", mw)
-    ideas_action.triggered.connect(show_card_ideas_dialog)
-    mw.form.menuTools.addAction(ideas_action)
+    a = menu.addAction("Toggle Flip/Freeform\tCtrl+Shift+V")
+    a.setShortcut("Ctrl+Shift+V")
+    a.triggered.connect(toggle_response_mode)
+
+    a = menu.addAction("Variant Peek\tCtrl+Shift+B")
+    a.setShortcut("Ctrl+Shift+B")
+    a.triggered.connect(toggle_variant_peek)
+
+    a = menu.addAction("Back to Question\tCtrl+Shift+Left")
+    a.setShortcut("Ctrl+Shift+Left")
+    a.triggered.connect(go_back_to_question)
 
 
 def toggle_response_mode():

@@ -36,6 +36,7 @@ if "aqt" not in sys.modules:
 
     _qt = types.ModuleType("aqt.qt")
     _qt.QAction = type("QAction", (), {"__init__": lambda *a, **kw: None})
+    _qt.QMenu = type("QMenu", (), {"__init__": lambda *a, **kw: None})
     _qt.QThread = type("QThread", (), {"__init__": lambda *a, **kw: None})
     _qt.pyqtSignal = lambda *a, **kw: lambda *a2, **kw2: None
     _qt.QObject = type("QObject", (), {})
