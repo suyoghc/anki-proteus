@@ -250,7 +250,9 @@ VARIANT_STYLES = {
             "  Do NOT write the actual names, terms, or descriptions in the diagram.\n"
             "  The diagram shows structure/relationships; the letters mark what to identify.\n"
             "- No external references (fonts, images). Everything inline.\n"
-            "- The diagram must be meaningful — not decorative.\n\n"
+            "- The diagram must be meaningful — not decorative.\n"
+            "- If the concept CANNOT be meaningfully represented as a diagram,\n"
+            "  set \"svg\" to null and return a text-only question instead.\n\n"
             "Question rules:\n"
             "- The text question should reference the diagram: 'Identify parts A, B, C.'\n"
             "- Test the SAME concept as the original flashcard.\n"
@@ -402,7 +404,13 @@ def generate_variant(question: str, answer: str, config: dict,
         variant = _normalize_variant_text(str(parsed.get("question", "")))
         expected_answer = str(parsed.get("expected_answer", "")).strip()
         if is_visual:
-            svg = str(parsed.get("svg", "")).strip()
+            raw_svg = parsed.get("svg")
+            if raw_svg and str(raw_svg).strip().lower() not in ("null", "none", ""):
+                svg = str(raw_svg).strip()
+            else:
+                # LLM opted out of diagram — treat as text-only
+                is_visual = False
+                style_name = "wozniak_matuschak"
     except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
         if is_visual:
             # Visual styles require valid JSON with svg field — no fallback
@@ -410,8 +418,6 @@ def generate_variant(question: str, answer: str, config: dict,
         variant = _normalize_variant_text(raw)
 
     if not variant:
-        return None
-    if is_visual and not svg:
         return None
 
     # Length enforcement (skip for visual styles — SVG is the main content)
