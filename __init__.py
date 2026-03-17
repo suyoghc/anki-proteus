@@ -129,8 +129,6 @@ def init_addon():
     a = menu.addAction("Variant Styles...")
     a.triggered.connect(show_variant_style_dialog)
 
-    a = menu.addAction("About Me...")
-    a.triggered.connect(show_learner_context_dialog)
 
     a = menu.addAction("Refresh Variant Cache")
     a.triggered.connect(refresh_variant_cache)
@@ -2207,53 +2205,10 @@ def _budget_bar_text(pct: int) -> str:
     )
 
 
-def show_learner_context_dialog():
-    """Show a dialog for the learner to describe themselves and their current focus."""
-    from aqt.qt import QDialog, QVBoxLayout, QLabel, QPushButton, QPlainTextEdit
-
-    dlg = QDialog(mw)
-    dlg.setWindowTitle("Proteus: About Me")
-    dlg.setMinimumWidth(420)
-    layout = QVBoxLayout()
-
-    layout.addWidget(QLabel(
-        "<b>About Me</b><br>"
-        "<span style='color: #666; font-size: 0.9em;'>"
-        "Describe yourself and what's currently relevant. "
-        "This context shapes how questions are framed.</span>"
-    ))
-
-    text_edit = QPlainTextEdit()
-    text_edit.setPlainText(CONFIG.get("learner_context", ""))
-    text_edit.setMinimumHeight(80)
-    text_edit.setPlaceholderText("Who are you? What are you working on right now?")
-    layout.addWidget(text_edit)
-
-    save_btn = QPushButton("Save")
-    skip_btn = QPushButton("Cancel")
-
-    def on_save():
-        ctx = text_edit.toPlainText().strip()
-        CONFIG["learner_context"] = ctx
-        tooltip("Proteus: context saved")
-        dlg.accept()
-
-    save_btn.clicked.connect(on_save)
-    skip_btn.clicked.connect(dlg.reject)
-
-    from aqt.qt import QHBoxLayout
-    btn_row = QHBoxLayout()
-    btn_row.addWidget(save_btn)
-    btn_row.addWidget(skip_btn)
-    layout.addLayout(btn_row)
-
-    dlg.setLayout(layout)
-    dlg.exec()
-
 
 def show_variant_style_dialog():
     """Show a dialog with checkboxes to pick active variant styles."""
-    from aqt.qt import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox
+    from aqt.qt import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QPlainTextEdit
     from .generator import VARIANT_STYLES
 
     style_labels = {
@@ -2312,6 +2267,26 @@ def show_variant_style_dialog():
             checkboxes[key] = cb
             layout.addWidget(cb)
 
+    # Personal learning context section
+    sep = QFrame()
+    sep.setFrameShape(QFrame.Shape.HLine)
+    sep.setStyleSheet("color: #ddd;")
+    layout.addWidget(sep)
+    layout.addWidget(QLabel(
+        "<span style='color: #888; font-size: 0.85em;'>Personal Learning Context</span>"
+    ))
+    layout.addWidget(QLabel(
+        "<span style='color: #666; font-size: 0.85em;'>"
+        "Describe yourself and what's currently relevant. "
+        "Shapes how questions are framed across all styles.</span>"
+    ))
+    context_edit = QPlainTextEdit()
+    context_edit.setPlainText(CONFIG.get("learner_context", ""))
+    context_edit.setMinimumHeight(60)
+    context_edit.setMaximumHeight(80)
+    context_edit.setPlaceholderText("e.g., PhD student preparing for quals on causal inference. I use Stan and R.")
+    layout.addWidget(context_edit)
+
     btn_row = QHBoxLayout()
     save_btn = QPushButton("Save")
     save_refresh_btn = QPushButton("Save and Refresh")
@@ -2323,6 +2298,7 @@ def show_variant_style_dialog():
             tooltip("Proteus: select at least one style")
             return None
         CONFIG["variant_style"] = selected
+        CONFIG["learner_context"] = context_edit.toPlainText().strip()
         return selected
 
     def on_save():
