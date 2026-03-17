@@ -120,6 +120,9 @@ def init_addon():
     a = menu.addAction("Usage Stats")
     a.triggered.connect(show_usage_dialog)
 
+    a = menu.addAction("Clear Variant Cache")
+    a.triggered.connect(clear_variant_cache)
+
     menu.addSeparator()
 
     a = menu.addAction("Toggle On/Off\tCtrl+Shift+P")
@@ -2041,6 +2044,19 @@ def _budget_bar_text(pct: int) -> str:
         f"<code><span style='color: {color};'>{bar}</span></code> "
         f"<b>{pct}%</b> of budget"
     )
+
+
+def clear_variant_cache():
+    """Clear all cached variants after user confirmation."""
+    from aqt.qt import QMessageBox
+    reply = QMessageBox.question(
+        mw, "Proteus",
+        "Clear all cached variants?\n\nNew variants will be generated on next review.",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+    )
+    if reply == QMessageBox.StandardButton.Yes and _cache:
+        _cache.clear_all()
+        tooltip("Proteus: variant cache cleared")
 
 
 def show_usage_dialog():
