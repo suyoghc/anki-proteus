@@ -1288,8 +1288,10 @@ def _freeform_input_html() -> str:
         'margin-top: 20px; padding: 12px; border-top: 1px solid #ddd;">'
         '<div style="font-size: 0.85em; color: #666; margin-bottom: 6px;">'
         'Speak or type your response:</div>'
+        '<div style="position: relative;">'
         '<textarea id="variant-response-input" rows="4" style="'
         'width: 100%; box-sizing: border-box; font-size: 1em; padding: 8px;'
+        ' padding-right: 44px;'
         ' border: 1px solid #ccc; border-radius: 4px; resize: vertical;'
         ' font-family: inherit;"'
         ' placeholder="Click here, then use Wispr Flow or type..."'
@@ -1297,13 +1299,25 @@ def _freeform_input_html() -> str:
         ' onkeydown="'
         """if (event.key === 'Enter' && !event.shiftKey) {"""
         ' event.preventDefault(); event.stopPropagation();'
-        """ pycmd('variantResponse:' + this.value);"""
+        " document.getElementById('variant-submit-btn').click();"
+        '}"'
+        '></textarea>'
+        '<button id="variant-submit-btn" onclick="'
+        "var ta = document.getElementById('variant-response-input');"
+        " if (!ta || !ta.value.trim()) return;"
+        """ pycmd('variantResponse:' + ta.value);"""
         """ pycmd('startGrading');"""
-        " this.disabled = true; this.style.opacity = '0.5';"
+        " ta.disabled = true; ta.style.opacity = '0.5';"
+        " this.style.opacity = '0.3'; this.disabled = true;"
         " var ea = document.getElementById('variant-expected-answer');"
         " if (ea && ea.innerHTML.trim()) { ea.style.display = 'block'; }"
-        '}"'
-        '></textarea></div>'
+        '" style="'
+        'position: absolute; bottom: 8px; right: 8px;'
+        ' background: none; border: none; cursor: pointer;'
+        ' font-size: 1.4em; opacity: 0.5; padding: 2px 6px;'
+        ' line-height: 1; border-radius: 4px;'
+        '" title="Submit response">&#10148;</button>'
+        '</div></div>'
         # Expected answer: pre-populated from cache if available, otherwise hidden placeholder
         + _prefilled_expected_answer_html()
         + (
