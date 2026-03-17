@@ -1024,6 +1024,10 @@ def on_js_message(handled: tuple, message: str, context):
         _save_current_idea(card_id=card_id, variant_id=variant_id)
         return (True, None)
 
+    if message == "addNewCard":
+        _open_add_note_blank()
+        return (True, None)
+
     if message == "startGrading":
         _start_early_grading()
         return (True, None)
@@ -1259,6 +1263,16 @@ def _feedback_buttons_html(card_id: int, variant_id: int) -> str:
             background: none; border: none; cursor: pointer;
             font-size: 1.3em; opacity: 0.5; padding: 2px 6px;
         " title="Save card idea">&#128278;</button>
+        <button id="vf-add" onclick="
+            try {
+                pycmd('addNewCard');
+                var btn = document.getElementById('vf-add');
+                btn.style.opacity='0.3';
+            } catch(e) {}
+        " style="
+            background: none; border: none; cursor: pointer;
+            font-size: 1.3em; opacity: 0.5; padding: 2px 6px;
+        " title="Add new card">&#10133;</button>
     </div>
     """ % (int(variant_id), int(variant_id), int(card_id), int(variant_id))
 
@@ -1998,6 +2012,15 @@ def show_card_ideas_dialog():
         dlg.exec()
     except Exception as e:
         showInfo(f"Proteus: card ideas dialog error: {e}")
+
+
+def _open_add_note_blank():
+    """Open the Add Note dialog for capturing a new card on the spot."""
+    try:
+        from aqt.addcards import AddCards
+        AddCards(mw)
+    except Exception as e:
+        showInfo(f"Proteus: could not open Add Note: {e}")
 
 
 def _open_add_note_with_idea(idea):
