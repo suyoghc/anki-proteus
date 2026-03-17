@@ -685,6 +685,8 @@ def grade_response(
 
     ea = expected_answer or ""
 
+    show_ai_coverage = bool(config.get("show_ai_coverage", False))
+
     if feedback_mode == "ai":
         system = GRADING_SYSTEM_PROMPT_AI.strip()
         user_msg = GRADING_USER_TEMPLATE_AI.format(
@@ -692,7 +694,7 @@ def grade_response(
             expected_answer=ea,
             response=user_response,
         )
-    elif feedback_mode == "both":
+    elif feedback_mode == "both" and show_ai_coverage:
         system = GRADING_SYSTEM_PROMPT_BOTH.strip()
         user_msg = GRADING_USER_TEMPLATE.format(
             question=variant_question,

@@ -63,6 +63,7 @@ def load_config():
         "grading_max_tokens": 280,         # room for full grading schema
         "grading_timeout_s": 10,           # fail fast if grading is slow
         "feedback_mode": "both",           # "ai", "canonical", or "both"
+        "show_ai_coverage": False,         # show AI coverage donut on question side
     }
     conf = mw.addonManager.getConfig(__name__)
     if conf:
@@ -708,7 +709,7 @@ def _render_evaluation_html(data, mode="answer"):
             if learning_feedback:
                 columns.append({"items": learning_feedback, "label": "Related",
                                 "color": "#1e88e5", "bg": "#e3f2fd"})
-            if ai_pct is not None:
+            if ai_pct is not None and CONFIG.get("show_ai_coverage", False):
                 columns.append({"items": None, "label": "AI coverage",
                                 "color": "#5f6368", "bg": "#f2f3f5",
                                 "coverage_pct": ai_pct})

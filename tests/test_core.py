@@ -889,7 +889,8 @@ class TestFeedbackModePromptSelection:
             variant_question="Q",
             user_response="R",
             canonical_answer="A",
-            config={"api_key": "k", "model": "m", "feedback_mode": "both"},
+            config={"api_key": "k", "model": "m", "feedback_mode": "both",
+                    "show_ai_coverage": True},
         )
 
         assert "TWO perspectives" in captured["system"]
