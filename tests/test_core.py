@@ -1072,9 +1072,10 @@ class TestAIFieldNormalization:
 
 class TestVariantGenerationConstraints:
 
-    def test_variant_prompt_includes_minimalistic_constraint(self):
-        """System prompt should mention minimalistic communication."""
-        assert "minimalistically" in generator.VARIANT_SYSTEM_PROMPT
+    def test_variant_prompt_includes_directness_constraint(self):
+        """System prompt should enforce direct, no-fluff questions."""
+        assert "No preamble" in generator.VARIANT_SYSTEM_PROMPT
+        assert "No subordinate clauses" in generator.VARIANT_SYSTEM_PROMPT
 
     def test_variant_prompt_never_longer_constraint(self):
         """System prompt should say never longer than original."""

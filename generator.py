@@ -112,7 +112,7 @@ Rules:
 - Do NOT make the question significantly harder or easier than the original.
 - Do NOT include the answer in your question.
 - Keep the question concise — never longer than the original question.
-- Communicate minimalistically, prioritizing clarity and engagement.
+- Get to the point immediately. No preamble, no setup, no "In the context of...".
 - Use short, direct sentences. No subordinate clauses. No filler words.
 - Use plain text (no markdown formatting).
 - The expected_answer should be a concise ideal answer to the variant question (max 28 words).
