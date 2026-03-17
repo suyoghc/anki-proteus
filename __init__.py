@@ -62,6 +62,7 @@ def load_config():
         "grading_model": "",               # optional override for grading model
         "grading_max_tokens": 280,         # room for full grading schema
         "grading_timeout_s": 10,           # fail fast if grading is slow
+        "learner_context": "",              # personal context injected into prompts
         "variant_style": ["wozniak_matuschak"],       # list of styles to sample from
         "feedback_mode": "both",           # "ai", "canonical", or "both"
         "show_ai_coverage": False,         # show AI coverage donut on question side
@@ -106,6 +107,10 @@ def init_addon():
         showInfo("Proteus: No API key configured.\n\n"
                  "Set it in: Tools → Add-ons → select Proteus → Config")
 
+    # First-run: prompt for learner context
+    if CONFIG.get("api_key") and not CONFIG.get("learner_context"):
+        QTimer.singleShot(1000, lambda: show_learner_context_dialog(first_run=True))
+
     # Register hooks
     gui_hooks.card_will_show.append(on_card_will_show)
     gui_hooks.reviewer_did_show_question.append(on_question_shown)
@@ -125,6 +130,9 @@ def init_addon():
 
     a = menu.addAction("Variant Styles...")
     a.triggered.connect(show_variant_style_dialog)
+
+    a = menu.addAction("About Me...")
+    a.triggered.connect(show_learner_context_dialog)
 
     a = menu.addAction("Refresh Variant Cache")
     a.triggered.connect(refresh_variant_cache)
@@ -2199,6 +2207,60 @@ def _budget_bar_text(pct: int) -> str:
         f"<code><span style='color: {color};'>{bar}</span></code> "
         f"<b>{pct}%</b> of budget"
     )
+
+
+def show_learner_context_dialog(first_run=False):
+    """Show a dialog for the learner to describe themselves and their current focus."""
+    from aqt.qt import QDialog, QVBoxLayout, QLabel, QPushButton, QPlainTextEdit
+
+    dlg = QDialog(mw)
+    dlg.setWindowTitle("Proteus: About Me")
+    dlg.setMinimumWidth(420)
+    layout = QVBoxLayout()
+
+    if first_run:
+        layout.addWidget(QLabel(
+            "<b>Welcome to Proteus!</b><br><br>"
+            "Tell me about yourself in 1-2 sentences. This helps generate\n"
+            "questions that are personally relevant to you.<br><br>"
+            "<span style='color: #666; font-size: 0.9em;'>"
+            "Example: \"PhD student studying Bayesian methods for educational\n"
+            "measurement. Preparing for qualifying exam. I use Stan and R.\"</span>"
+        ))
+    else:
+        layout.addWidget(QLabel(
+            "<b>About Me</b><br>"
+            "<span style='color: #666; font-size: 0.9em;'>"
+            "Describe yourself and what's currently relevant. "
+            "This context shapes how questions are framed.</span>"
+        ))
+
+    text_edit = QPlainTextEdit()
+    text_edit.setPlainText(CONFIG.get("learner_context", ""))
+    text_edit.setMinimumHeight(80)
+    text_edit.setPlaceholderText("Who are you? What are you working on right now?")
+    layout.addWidget(text_edit)
+
+    save_btn = QPushButton("Save")
+    skip_btn = QPushButton("Skip" if first_run else "Cancel")
+
+    def on_save():
+        ctx = text_edit.toPlainText().strip()
+        CONFIG["learner_context"] = ctx
+        tooltip("Proteus: context saved")
+        dlg.accept()
+
+    save_btn.clicked.connect(on_save)
+    skip_btn.clicked.connect(dlg.reject)
+
+    from aqt.qt import QHBoxLayout
+    btn_row = QHBoxLayout()
+    btn_row.addWidget(save_btn)
+    btn_row.addWidget(skip_btn)
+    layout.addLayout(btn_row)
+
+    dlg.setLayout(layout)
+    dlg.exec()
 
 
 def show_variant_style_dialog():

@@ -501,9 +501,12 @@ def generate_variant(question: str, answer: str, config: dict,
         system = system.format(cognitive_level=level)
     system = system.strip()
 
-    domain_ctx = ""
+    ctx_parts = []
     if config.get("system_prompt"):
-        domain_ctx = f"Domain context: {config['system_prompt']}"
+        ctx_parts.append(f"Domain context: {config['system_prompt']}")
+    if config.get("learner_context"):
+        ctx_parts.append(f"Learner context: {config['learner_context']}")
+    domain_ctx = "\n".join(ctx_parts)
 
     user_msg = VARIANT_USER_TEMPLATE.format(
         question=question,
