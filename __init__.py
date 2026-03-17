@@ -447,13 +447,15 @@ class _GradingWorker(QThread):
     done = pyqtSignal(object, str)    # (card_id, evaluation_json)
     failed = pyqtSignal(object, str)  # (card_id, error_message)
 
-    def __init__(self, card_id, variant_question, user_response, canonical_answer, config):
+    def __init__(self, card_id, variant_question, user_response, canonical_answer,
+                 config, expected_answer=""):
         super().__init__()
         self._card_id = card_id
         self._variant_question = variant_question
         self._user_response = user_response
         self._canonical_answer = canonical_answer
         self._config = config
+        self._expected_answer = expected_answer
 
     def run(self):
         try:
@@ -462,6 +464,7 @@ class _GradingWorker(QThread):
                 user_response=self._user_response,
                 canonical_answer=self._canonical_answer,
                 config=self._config,
+                expected_answer=self._expected_answer,
             )
             if result:
                 self.done.emit(self._card_id, json.dumps(result))
@@ -957,6 +960,7 @@ def _start_early_grading():
             user_response=_user_response,
             canonical_answer=answer_text,
             config=CONFIG,
+            expected_answer=_current_expected_answer,
         )
         _grading_worker.done.connect(_on_grading_done)
         _grading_worker.failed.connect(_on_grading_failed)
@@ -997,6 +1001,7 @@ def on_answer_shown(card):
         user_response=_user_response,
         canonical_answer=answer_text,
         config=CONFIG,
+        expected_answer=_current_expected_answer,
     )
     _grading_worker.done.connect(_on_grading_done)
     _grading_worker.failed.connect(_on_grading_failed)

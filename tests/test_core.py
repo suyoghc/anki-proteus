@@ -830,8 +830,9 @@ class TestFeedbackModePromptSelection:
             config={"api_key": "k", "model": "m", "feedback_mode": "ai"},
         )
 
-        assert "determine the ideal answer" in captured["system"]
+        assert "provided expected answer" in captured["system"]
         assert "Canonical answer" not in captured["user_message"]
+        assert "Expected answer:" in captured["user_message"]
         assert "Q" in captured["user_message"]
         assert "R" in captured["user_message"]
 

@@ -271,6 +271,7 @@ GRADING_SYSTEM_PROMPT = """You are a response evaluator for a spaced repetition 
 The learner was shown a question and gave a spoken/typed response. Your job is to
 evaluate whether their response demonstrates understanding of the concept.
 
+You are given the expected answer for the variant question. Use it as the answer target.
 First, decide whether the shown question is aligned to the canonical answer target.
 
 Rules:
@@ -286,12 +287,11 @@ Rules:
 Return your evaluation as a JSON object with exactly these keys:
 - "alignment": string — one of "aligned", "partial", "misaligned"
 - "alignment_note": string — short reason for the alignment judgment
-- "expected_answer": string — concise answer target for the shown question
 - "canonical_points": array of strings — core answer points to check
 - "covered_points": array of strings — canonical points the learner covered
 - "missed_points": array of strings — canonical points the learner missed
 - "coverage_pct": integer 0..100, based only on canonical coverage
-- "question_gap_points": array of strings — canonical points not really tested by the shown question/new expected target
+- "question_gap_points": array of strings — canonical points not really tested by the shown question
 - "learning_feedback": array of strings — concise related insights (can be empty)
 - "incorrect": array of strings — things the learner stated incorrectly (empty array if none)
 - "overall": string — 1 sentence summary of their performance
@@ -304,7 +304,6 @@ Coverage rule:
 
 Output limits (strict):
 - "alignment_note": max 18 words.
-- "expected_answer": max 28 words.
 - "overall": max 18 words.
 - Each array item: max 14 words.
 - Max 2 items in "learning_feedback".
@@ -316,6 +315,8 @@ Keep each bullet point to one concise sentence. Return ONLY the JSON object, no 
 
 GRADING_USER_TEMPLATE = """Question shown: {question}
 
+Expected answer: {expected_answer}
+
 Canonical answer: {answer}
 
 Learner's response: {response}
@@ -326,18 +327,16 @@ Evaluate their response as JSON."""
 GRADING_SYSTEM_PROMPT_AI = """You are a response evaluator for a spaced repetition system.
 
 The learner was shown a question and gave a spoken/typed response. Your job is to
-determine the ideal answer for the shown question and evaluate the response against it.
+evaluate the response against the provided expected answer.
 
 Rules:
 - The response may be voice-transcribed: ignore filler words, disfluencies, grammar
   issues, and informal phrasing. Evaluate ONLY conceptual correctness.
-- First determine what the ideal answer to the shown question would be.
-- Evaluate the response against that ideal answer — NOT against any external reference.
+- Evaluate the response against the expected answer provided — NOT against any external reference.
 - Be encouraging but honest.
 - Always provide useful related-learning observations in "learning_feedback".
 
 Return your evaluation as a JSON object with exactly these keys:
-- "expected_answer": string — concise ideal answer for the shown question
 - "ai_covered_points": array of strings — expected-answer points the learner addressed
 - "ai_missed_points": array of strings — expected-answer points the learner missed
 - "ai_coverage_pct": integer 0..100, based on expected-answer coverage
@@ -346,7 +345,6 @@ Return your evaluation as a JSON object with exactly these keys:
 - "overall": string — 1 sentence summary of their performance
 
 Output limits (strict):
-- "expected_answer": max 28 words.
 - "overall": max 18 words.
 - Each array item: max 14 words.
 - Max 2 items in "learning_feedback".
@@ -357,6 +355,8 @@ Keep each bullet point to one concise sentence. Return ONLY the JSON object, no 
 
 GRADING_USER_TEMPLATE_AI = """Question shown: {question}
 
+Expected answer: {expected_answer}
+
 Learner's response: {response}
 
 Evaluate their response as JSON."""
@@ -365,7 +365,7 @@ Evaluate their response as JSON."""
 GRADING_SYSTEM_PROMPT_BOTH = """You are a response evaluator for a spaced repetition system.
 
 The learner was shown a question and gave a spoken/typed response. Your job is to
-evaluate their response from TWO perspectives: against the question's own ideal answer,
+evaluate their response from TWO perspectives: against the provided expected answer,
 and against the canonical flashcard answer.
 
 First, decide whether the shown question is aligned to the canonical answer target.
@@ -379,8 +379,7 @@ Rules:
 
 Return your evaluation as a JSON object with exactly these keys:
 
-AI answer perspective (vs the question's ideal answer):
-- "expected_answer": string — concise answer target for the shown question
+Expected answer perspective (vs the provided expected answer):
 - "ai_covered_points": array of strings — expected-answer points the learner addressed
 - "ai_missed_points": array of strings — expected-answer points the learner missed
 - "ai_coverage_pct": integer 0..100, based on expected-answer coverage
@@ -405,7 +404,6 @@ Coverage rules:
 
 Output limits (strict):
 - "alignment_note": max 18 words.
-- "expected_answer": max 28 words.
 - "overall": max 18 words.
 - Each array item: max 14 words.
 - Max 2 items in "learning_feedback".
@@ -663,6 +661,7 @@ def grade_response(
     user_response: str,
     canonical_answer: str,
     config: dict,
+    expected_answer: str = "",
 ) -> Optional[dict]:
     """
     Grade a freeform response against the canonical answer.
@@ -684,16 +683,20 @@ def grade_response(
     timeout_s = float(config.get("grading_timeout_s", 10))
     feedback_mode = str(config.get("feedback_mode", "canonical")).strip().lower()
 
+    ea = expected_answer or ""
+
     if feedback_mode == "ai":
         system = GRADING_SYSTEM_PROMPT_AI.strip()
         user_msg = GRADING_USER_TEMPLATE_AI.format(
             question=variant_question,
+            expected_answer=ea,
             response=user_response,
         )
     elif feedback_mode == "both":
         system = GRADING_SYSTEM_PROMPT_BOTH.strip()
         user_msg = GRADING_USER_TEMPLATE.format(
             question=variant_question,
+            expected_answer=ea,
             answer=canonical_answer,
             response=user_response,
         )
@@ -702,6 +705,7 @@ def grade_response(
         system = GRADING_SYSTEM_PROMPT.strip()
         user_msg = GRADING_USER_TEMPLATE.format(
             question=variant_question,
+            expected_answer=ea,
             answer=canonical_answer,
             response=user_response,
         )
@@ -737,16 +741,21 @@ def grade_response(
 
     try:
         data = json.loads(raw)
-        return _normalize_grading_payload(dict(data))
+        result = _normalize_grading_payload(dict(data))
+        if ea and not result.get("expected_answer"):
+            result["expected_answer"] = ea
+        return result
     except (json.JSONDecodeError, ValueError, TypeError):
         partial = _parse_partial_grading_payload(raw)
         if partial is not None:
+            if ea and not partial.get("expected_answer"):
+                partial["expected_answer"] = ea
             return partial
         # LLM didn't return valid JSON — return neutral fallback (no raw dump)
         return {
             "alignment": "aligned",
             "alignment_note": "",
-            "expected_answer": "",
+            "expected_answer": ea,
             "canonical_points": [],
             "covered_points": [],
             "missed_points": [],
