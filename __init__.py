@@ -2275,6 +2275,8 @@ def show_variant_style_dialog():
     dlg.setMinimumWidth(420)
     layout = QVBoxLayout()
 
+    from aqt.qt import QFrame
+
     layout.addWidget(QLabel(
         "<b>Select variant styles</b><br>"
         "<span style='color: #666; font-size: 0.9em;'>"
@@ -2286,12 +2288,29 @@ def show_variant_style_dialog():
         current = [current]
     current_set = set(current)
 
+    style_groups = [
+        ("Core", ["wozniak_matuschak", "bloom", "elaborative", "feynman"]),
+        ("Contrast & Recall", ["discrimination", "cloze_generation", "real_world"]),
+        ("Transfer", ["transfer_code", "transfer_stats", "transfer_math"]),
+        ("Visual", ["diagram_labeling"]),
+    ]
+
     checkboxes = {}
-    for key in VARIANT_STYLES:
-        cb = QCheckBox(style_labels.get(key, key))
-        cb.setChecked(key in current_set)
-        checkboxes[key] = cb
-        layout.addWidget(cb)
+    for group_name, keys in style_groups:
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #ddd;")
+        layout.addWidget(sep)
+        layout.addWidget(QLabel(
+            f"<span style='color: #888; font-size: 0.85em;'>{group_name}</span>"
+        ))
+        for key in keys:
+            if key not in VARIANT_STYLES:
+                continue
+            cb = QCheckBox(style_labels.get(key, key))
+            cb.setChecked(key in current_set)
+            checkboxes[key] = cb
+            layout.addWidget(cb)
 
     btn_row = QHBoxLayout()
     save_btn = QPushButton("Save")
