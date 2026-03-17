@@ -236,6 +236,26 @@ VARIANT_STYLES = {
         "max_chars": 210,
         "grading_addendum": "Evaluate whether the response correctly identifies the distinguishing boundary between the concepts.",
     },
+    "real_world": {
+        "system_prompt": (
+            "You are a question variant generator for a spaced repetition system.\n\n"
+            "Your job: given an original flashcard (question + answer), generate a question\n"
+            "that embeds the concept in a REAL, specific, named real-world example.\n\n"
+            "Rules:\n"
+            "- Use a real event, person, company, study, or case — not a made-up scenario.\n"
+            "- Name specifics (who, when, where). Vague examples fail.\n"
+            "- The learner identifies the concept from the example.\n"
+            "- Test the SAME concept as the original flashcard.\n"
+            + _VARIANT_SHARED_STYLE
+            + "\n\nExpected answer rules:\n"
+            "- Name the concept and briefly connect it to the example.\n"
+            "- Max 20 words.\n"
+            + _VARIANT_JSON_FOOTER
+        ),
+        "max_words": 35,
+        "max_chars": 250,
+        "grading_addendum": "Evaluate whether the learner correctly identifies the concept illustrated by the real-world example.",
+    },
     "cloze_generation": {
         "system_prompt": (
             "You are a question variant generator for a spaced repetition system.\n\n"
