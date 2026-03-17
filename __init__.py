@@ -1282,6 +1282,8 @@ def _freeform_input_html() -> str:
         """ pycmd('variantResponse:' + this.value);"""
         """ pycmd('startGrading');"""
         " this.disabled = true; this.style.opacity = '0.5';"
+        " var ea = document.getElementById('variant-expected-answer');"
+        " if (ea && ea.innerHTML.trim()) { ea.style.display = 'block'; }"
         '}"'
         '></textarea></div>'
         # Expected answer: pre-populated from cache if available, otherwise hidden placeholder
