@@ -1032,6 +1032,10 @@ def on_js_message(handled: tuple, message: str, context):
         _open_add_note_from_variant()
         return (True, None)
 
+    if message == "quickSaveVariantCard":
+        _quick_save_variant_card()
+        return (True, None)
+
     if message == "startGrading":
         _start_early_grading()
         return (True, None)
@@ -1277,6 +1281,17 @@ def _feedback_buttons_html(card_id: int, variant_id: int) -> str:
             background: none; border: none; cursor: pointer;
             font-size: 1.3em; opacity: 0.5; padding: 2px 6px;
         " title="Add new card">&#10133;</button>
+        <button id="vf-quick-save" onclick="
+            try {
+                pycmd('quickSaveVariantCard');
+                var btn = document.getElementById('vf-quick-save');
+                btn.textContent = '\\u2713';
+                btn.disabled = true;
+            } catch(e) {}
+        " style="
+            background: none; border: none; cursor: pointer;
+            font-size: 1.3em; opacity: 0.5; padding: 2px 6px;
+        " title="Quick save variant Q+A as new card">&#128190;</button>
         <button id="vf-capture" onclick="
             try {
                 pycmd('captureVariantCard');
@@ -2027,6 +2042,33 @@ def show_card_ideas_dialog():
         dlg.exec()
     except Exception as e:
         showInfo(f"Proteus: card ideas dialog error: {e}")
+
+
+def _quick_save_variant_card():
+    """Directly save a new card with variant question as front, AI answer as back."""
+    try:
+        front = _current_variant or ""
+        back = _current_expected_answer or ""
+        if not front:
+            tooltip("Proteus: no active variant")
+            return
+        if not back:
+            tooltip("Proteus: no AI answer target available")
+            return
+
+        col = mw.col
+        model = col.models.current()
+        note = col.new_note(model)
+        if len(note.fields) >= 2:
+            note.fields[0] = front
+            note.fields[1] = back
+            col.add_note(note, col.decks.current()["id"])
+            tooltip("Proteus: card saved")
+        else:
+            tooltip("Proteus: note type needs at least 2 fields")
+    except Exception as e:
+        _log(f"quick save failed: {e}")
+        tooltip(f"Proteus: save failed — {e}")
 
 
 def _open_add_note_from_variant():
