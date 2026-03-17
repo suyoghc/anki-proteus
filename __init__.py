@@ -1376,7 +1376,8 @@ def _extract_text(card, side: str) -> str:
     else:
         text = card.answer()
 
-    # Strip HTML tags for LLM consumption
+    # Strip style/script blocks (tags + content), then remaining HTML tags
+    text = re.sub(r'<(style|script)[^>]*>.*?</\1>', ' ', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
