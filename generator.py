@@ -135,12 +135,14 @@ VARIANT_STYLES = {
             "- Keep the question concise — never longer than the original question.\n"
             + _VARIANT_SHARED_STYLE
             + "\n\nExpected answer rules:\n"
-            "- Concise ideal answer (max 28 words). Short, direct sentences.\n"
+            "- ONE fact only. If the question asks for one thing, the answer is one thing.\n"
+            "- No semicolons joining multiple statements. No lists.\n"
+            "- Max 15 words. Short, direct, single sentence.\n"
             + _VARIANT_JSON_FOOTER
         ),
         "max_words": 26,
         "max_chars": 180,
-        "grading_addendum": "",
+        "grading_addendum": "The expected answer should contain exactly one atomic fact. Grade the learner's response against that single fact only.",
     },
     "bloom": {
         "system_prompt": (
