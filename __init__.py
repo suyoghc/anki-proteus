@@ -62,6 +62,7 @@ def load_config():
         "grading_model": "",               # optional override for grading model
         "grading_max_tokens": 280,         # room for full grading schema
         "grading_timeout_s": 10,           # fail fast if grading is slow
+        "variant_style": ["wozniak"],       # list of styles to sample from
         "feedback_mode": "both",           # "ai", "canonical", or "both"
         "show_ai_coverage": False,         # show AI coverage donut on question side
     }
@@ -83,6 +84,7 @@ _current_variant: str = None          # variant being shown right now
 _current_variant_id: int = None       # DB row id for feedback
 _current_card_id: int = None
 _current_expected_answer: str = ""    # pre-fetched expected answer
+_current_variant_style: str = ""     # style used for the current variant
 _user_response: str = ""              # captured from freeform text input
 _evaluation_text: str = None          # LLM grading result
 _grading_worker = None                # background grading QThread
@@ -268,7 +270,8 @@ def should_prefetch(card) -> bool:
 
 def on_card_will_show(text: str, card, kind: str) -> str:
     """Intercept card display. Replace question with variant if eligible."""
-    global _current_variant, _current_variant_id, _current_card_id, _current_expected_answer
+    global _current_variant, _current_variant_id, _current_card_id
+    global _current_expected_answer, _current_variant_style
     global _evaluation_text, _user_response
 
     try:
@@ -289,6 +292,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             _current_variant = None
             _current_variant_id = None
             _current_expected_answer = ""
+            _current_variant_style = ""
             _user_response = ""
             _current_card_id = card.id
 
@@ -299,7 +303,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             result = _cache.get_variant(card.id)
 
             if result:
-                _current_variant_id, _current_variant, _current_expected_answer = result
+                _current_variant_id, _current_variant, _current_expected_answer, _current_variant_style = result
                 styled_variant = _wrap_variant_html(_current_variant)
                 styled_variant += _feedback_buttons_html(card.id, _current_variant_id)
                 if CONFIG.get("response_mode") == "freeform":
@@ -913,12 +917,15 @@ def _start_early_grading():
         answer_text = _extract_text(card, "answer")
         _cleanup_grading_worker()
         _log(f"grading: early start for card {_current_card_id}")
+        grading_cfg = dict(CONFIG)
+        grading_cfg["_variant_style"] = _current_variant_style
+        grading_cfg["_grading_card_ivl"] = card.ivl
         _grading_worker = _GradingWorker(
             card_id=_current_card_id,
             variant_question=_current_variant,
             user_response=_user_response,
             canonical_answer=answer_text,
-            config=CONFIG,
+            config=grading_cfg,
             expected_answer=_current_expected_answer,
         )
         _grading_worker.done.connect(_on_grading_done)
@@ -954,12 +961,15 @@ def on_answer_shown(card):
 
     answer_text = _extract_text(card, "answer")
     _log(f"grading: starting worker for card {card.id}")
+    grading_cfg = dict(CONFIG)
+    grading_cfg["_variant_style"] = _current_variant_style
+    grading_cfg["_grading_card_ivl"] = card.ivl
     _grading_worker = _GradingWorker(
         card_id=card.id,
         variant_question=_current_variant,
         user_response=_user_response,
         canonical_answer=answer_text,
-        config=CONFIG,
+        config=grading_cfg,
         expected_answer=_current_expected_answer,
     )
     _grading_worker.done.connect(_on_grading_done)
@@ -1062,6 +1072,7 @@ def _prefetch_next_card():
                 answer=answer,
                 config=CONFIG,
                 cache=_cache,
+                card_ivl=next_card.ivl,
             )
             _prefetch_worker.start()
     except Exception as e:
@@ -1132,7 +1143,7 @@ def _start_batch_prefetch():
 
         question = _extract_text(card, "question")
         answer = _extract_text(card, "answer")
-        _batch_manager.enqueue(card.id, question, answer)
+        _batch_manager.enqueue(card.id, question, answer, card.ivl)
         enqueued += 1
 
     if enqueued == 0:

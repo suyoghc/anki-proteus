@@ -42,7 +42,7 @@ class _BatchWorker(QThread):
             except queue.Empty:
                 break
 
-            card_id, question, answer = item
+            card_id, question, answer, card_ivl = item
 
             # Another worker (or single-card prefetch) may have filled this
             if self._cache.has_variant(card_id):
@@ -56,12 +56,14 @@ class _BatchWorker(QThread):
                     question=question,
                     answer=answer,
                     config=self._config,
+                    card_ivl=card_ivl,
                 )
                 if result:
                     self._cache.store_variant(
                         card_id,
                         result["question"],
                         result.get("expected_answer", ""),
+                        result.get("variant_style", ""),
                     )
                     _log(f"worker: card {card_id} done ({len(result['question'])} chars)", self._debug)
                 else:
@@ -103,10 +105,10 @@ class BatchPrefetchManager(QObject):
         self._last_reported = 0
         self._poll_timer = None  # type: Optional[QTimer]
 
-    def enqueue(self, card_id, question, answer):
-        # type: (int, str, str) -> None
+    def enqueue(self, card_id, question, answer, card_ivl=0):
+        # type: (int, str, str, int) -> None
         """Add a work item. Call before start()."""
-        self._queue.put((card_id, question, answer))
+        self._queue.put((card_id, question, answer, card_ivl))
         self._total += 1
 
     def start(self):

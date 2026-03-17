@@ -18,6 +18,7 @@
     "grading_model": "",
     "grading_max_tokens": 280,
     "grading_timeout_s": 10,
+    "variant_style": ["wozniak"],
     "feedback_mode": "both",
     "show_ai_coverage": false
 }

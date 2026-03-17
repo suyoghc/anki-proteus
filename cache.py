@@ -16,7 +16,7 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 
 class VariantCache:
@@ -127,19 +127,27 @@ class VariantCache:
                 except sqlite3.OperationalError:
                     pass
 
+            if version < 8:
+                try:
+                    self._conn.execute(
+                        "ALTER TABLE variants ADD COLUMN variant_style TEXT DEFAULT NULL"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+
             if version < _SCHEMA_VERSION:
                 self._set_version(_SCHEMA_VERSION)
 
             self._conn.commit()
 
-    def get_variant(self, card_id: int) -> Optional[Tuple[int, str, str]]:
+    def get_variant(self, card_id: int) -> Optional[Tuple[int, str, str, str]]:
         """
         Get an unused variant for a card. Marks it as used.
-        Returns (variant_id, text, expected_answer) or None.
+        Returns (variant_id, text, expected_answer, variant_style) or None.
         """
         with self._lock:
             cursor = self._conn.execute(
-                """SELECT id, variant_text, expected_answer FROM variants
+                """SELECT id, variant_text, expected_answer, variant_style FROM variants
                    WHERE card_id = ? AND used = 0
                    ORDER BY created_at ASC
                    LIMIT 1""",
@@ -147,13 +155,13 @@ class VariantCache:
             )
             row = cursor.fetchone()
             if row:
-                variant_id, text, expected_answer = row
+                variant_id, text, expected_answer, variant_style = row
                 self._conn.execute(
                     "UPDATE variants SET used = 1 WHERE id = ?",
                     (variant_id,),
                 )
                 self._conn.commit()
-                return (variant_id, text, expected_answer or "")
+                return (variant_id, text, expected_answer or "", variant_style or "")
             return None
 
     def get_variant_by_id(self, variant_id: int) -> Optional[Tuple[int, str, Optional[int], str]]:
@@ -185,7 +193,8 @@ class VariantCache:
             )
             return cursor.fetchone() is not None
 
-    def store_variant(self, card_id: int, variant_text: str, expected_answer: str = ""):
+    def store_variant(self, card_id: int, variant_text: str,
+                      expected_answer: str = "", variant_style: str = ""):
         """Store a generated variant, enforcing the max per card."""
         with self._lock:
             # Check if we're at the limit for unused variants
@@ -198,9 +207,11 @@ class VariantCache:
                 return  # already have enough cached
 
             self._conn.execute(
-                """INSERT INTO variants (card_id, variant_text, created_at, used, expected_answer)
-                   VALUES (?, ?, ?, 0, ?)""",
-                (card_id, variant_text, time.time(), expected_answer or None),
+                """INSERT INTO variants (card_id, variant_text, created_at, used,
+                   expected_answer, variant_style)
+                   VALUES (?, ?, ?, 0, ?, ?)""",
+                (card_id, variant_text, time.time(),
+                 expected_answer or None, variant_style or None),
             )
             self._conn.commit()
 

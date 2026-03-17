@@ -26,6 +26,7 @@ class PrefetchWorker(QThread):
         answer: str,
         config: dict,
         cache,  # VariantCache instance
+        card_ivl: int = 0,
     ):
         super().__init__()
         self._card_id = card_id
@@ -33,6 +34,7 @@ class PrefetchWorker(QThread):
         self._answer = answer
         self._config = config
         self._cache = cache
+        self._card_ivl = card_ivl
 
     def run(self):
         """Generate variant in background thread."""
@@ -41,12 +43,14 @@ class PrefetchWorker(QThread):
                 question=self._question,
                 answer=self._answer,
                 config=self._config,
+                card_ivl=self._card_ivl,
             )
             if result:
                 self._cache.store_variant(
                     self._card_id,
                     result["question"],
                     result.get("expected_answer", ""),
+                    result.get("variant_style", ""),
                 )
                 self.finished.emit(self._card_id, result["question"])
         except Exception as e:

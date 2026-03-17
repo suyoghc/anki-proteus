@@ -99,38 +99,138 @@ def reset_usage():
 # Variant Generation
 # ---------------------------------------------------------------------------
 
-VARIANT_SYSTEM_PROMPT = """You are a question variant generator for a spaced repetition system.
-
-Your job: given an original flashcard (question + answer), generate a SINGLE new question
-that tests the SAME underlying concept but looks different, plus a concise expected answer.
-
-Question design principles (inspired by the minimum information principle):
-- Test exactly ONE piece of knowledge. Never combine two asks.
-- Word the question so there is only one correct, unambiguous answer.
-- Anchor the question to something concrete — a scenario, example, or vivid image.
-- Never ask the learner to list or enumerate. Ask about one specific item.
-- Cloze deletion style ("_____ is the term for...") is acceptable.
-- Vary the angle: rephrase, pose a scenario, ask "what goes wrong if...",
-  ask the learner to explain why, or present an error to identify.
-
-Style rules:
-- Do NOT make the question significantly harder or easier than the original.
-- Do NOT include the answer in your question.
-- Keep the question concise — never longer than the original question.
-- Get to the point immediately. No preamble, no setup, no "In the context of...".
-- Use short, direct sentences. No subordinate clauses. No filler words.
-- Use plain text (no markdown formatting).
-
-Expected answer rules:
-- The expected_answer should be a concise ideal answer to the variant question (max 28 words).
-- Use short, direct sentences. No subordinate clauses. No filler words.
-
+_VARIANT_JSON_FOOTER = """
 Return a JSON object with exactly two keys:
 - "question": the new variant question text
 - "expected_answer": concise answer to the variant question
 
-Return ONLY the JSON object, no markdown fences.
-"""
+Return ONLY the JSON object, no markdown fences."""
+
+_VARIANT_SHARED_STYLE = """
+Style rules:
+- Do NOT include the answer in your question.
+- Get to the point immediately. No preamble, no setup, no "In the context of...".
+- Use short, direct sentences. No subordinate clauses. No filler words.
+- Use plain text (no markdown formatting)."""
+
+# ---------------------------------------------------------------------------
+# Variant styles registry
+# ---------------------------------------------------------------------------
+
+VARIANT_STYLES = {
+    "wozniak": {
+        "system_prompt": (
+            "You are a question variant generator for a spaced repetition system.\n\n"
+            "Your job: given an original flashcard (question + answer), generate a SINGLE new question\n"
+            "that tests the SAME underlying concept but looks different, plus a concise expected answer.\n\n"
+            "Question design principles (minimum information principle):\n"
+            "- Test exactly ONE piece of knowledge. Never combine two asks.\n"
+            "- Word the question so there is only one correct, unambiguous answer.\n"
+            "- Anchor the question to something concrete — a scenario, example, or vivid image.\n"
+            "- Never ask the learner to list or enumerate. Ask about one specific item.\n"
+            "- Cloze deletion style ('_____ is the term for...') is acceptable.\n"
+            "- Vary the angle: rephrase, pose a scenario, ask 'what goes wrong if...',\n"
+            "  ask the learner to explain why, or present an error to identify.\n"
+            "- Do NOT make the question significantly harder or easier than the original.\n"
+            "- Keep the question concise — never longer than the original question.\n"
+            + _VARIANT_SHARED_STYLE
+            + "\n\nExpected answer rules:\n"
+            "- Concise ideal answer (max 28 words). Short, direct sentences.\n"
+            + _VARIANT_JSON_FOOTER
+        ),
+        "max_words": 26,
+        "max_chars": 180,
+        "grading_addendum": "",
+    },
+    "bloom": {
+        "system_prompt": (
+            "You are a question variant generator for a spaced repetition system.\n\n"
+            "Your job: given an original flashcard (question + answer), generate a SINGLE new question\n"
+            "at the {cognitive_level} level of Bloom's taxonomy, plus a concise expected answer.\n\n"
+            "Bloom's level guidance:\n"
+            "- Remember/Understand: 'What is...', 'Define...', 'Which of these...'\n"
+            "- Understand/Apply: 'Why does...', 'Given scenario X, what would...'\n"
+            "- Apply/Analyze: 'Compare X and Y', 'What would happen if...'\n"
+            "- Analyze/Evaluate: 'Evaluate whether...', 'What is the strongest argument for...'\n\n"
+            "Generate at the {cognitive_level} level. Test the SAME concept as the original.\n"
+            "- Do NOT make it significantly harder or easier than the target level demands.\n"
+            + _VARIANT_SHARED_STYLE
+            + "\n\nExpected answer rules:\n"
+            "- Match the cognitive demand of the {cognitive_level} level.\n"
+            "- Concise ideal answer (max 28 words). Short, direct sentences.\n"
+            + _VARIANT_JSON_FOOTER
+        ),
+        "max_words": 30,
+        "max_chars": 210,
+        "grading_addendum": "Evaluate whether the response demonstrates the {cognitive_level} cognitive level, not just factual recall.",
+    },
+    "elaborative": {
+        "system_prompt": (
+            "You are a question variant generator for a spaced repetition system.\n\n"
+            "Your job: given an original flashcard (question + answer), generate a SINGLE\n"
+            "'why' or 'how' question that forces the learner to explain the mechanism or\n"
+            "reason behind the concept, plus a concise expected answer.\n\n"
+            "Rules:\n"
+            "- The question MUST start with 'Why' or 'How'.\n"
+            "- Do NOT accept a factual label as the answer — the expected answer must include reasoning.\n"
+            "- Test the SAME concept as the original.\n"
+            + _VARIANT_SHARED_STYLE
+            + "\n\nExpected answer rules:\n"
+            "- Focus on causal or mechanistic reasoning.\n"
+            "- Concise ideal answer (max 28 words). Short, direct sentences.\n"
+            + _VARIANT_JSON_FOOTER
+        ),
+        "max_words": 30,
+        "max_chars": 210,
+        "grading_addendum": "Evaluate depth of causal/mechanistic reasoning, not just factual recall.",
+    },
+    "feynman": {
+        "system_prompt": (
+            "You are a question variant generator for a spaced repetition system.\n\n"
+            "Your job: given an original flashcard (question + answer), ask the learner to\n"
+            "explain the concept in simple terms, as if teaching a beginner.\n"
+            "Also provide a concise expected answer.\n\n"
+            "Rules:\n"
+            "- Use 'Explain...' or 'Describe in simple terms...' framing.\n"
+            "- The learner should demonstrate they understand, not just recall a definition.\n"
+            "- Test the SAME concept as the original.\n"
+            + _VARIANT_SHARED_STYLE
+            + "\n\nExpected answer rules:\n"
+            "- Provide a simplified explanation using analogies or plain language.\n"
+            "- Max 50 words. Clarity over precision.\n"
+            + _VARIANT_JSON_FOOTER
+        ),
+        "max_words": 50,
+        "max_chars": 350,
+        "grading_addendum": "Evaluate clarity and simplicity of the explanation. Analogies and plain language are preferred over technical jargon.",
+    },
+    "discrimination": {
+        "system_prompt": (
+            "You are a question variant generator for a spaced repetition system.\n\n"
+            "Your job: given an original flashcard (question + answer), generate a SINGLE question\n"
+            "that asks how the concept differs from a related or commonly confused concept.\n"
+            "Also provide a concise expected answer.\n\n"
+            "Rules:\n"
+            "- The question MUST name both concepts explicitly.\n"
+            "- Ask about the key distinguishing feature(s).\n"
+            "- Pick a contrast that is genuinely confusable, not trivially different.\n"
+            "- Test the SAME concept as the original.\n"
+            + _VARIANT_SHARED_STYLE
+            + "\n\nExpected answer rules:\n"
+            "- Identify the key distinguishing feature(s) between the two concepts.\n"
+            "- Concise ideal answer (max 28 words). Short, direct sentences.\n"
+            + _VARIANT_JSON_FOOTER
+        ),
+        "max_words": 30,
+        "max_chars": 210,
+        "grading_addendum": "Evaluate whether the response correctly identifies the distinguishing boundary between the concepts.",
+    },
+}
+
+# Keep module-level constants for backward compat (tests, shorten pass default)
+VARIANT_SYSTEM_PROMPT = VARIANT_STYLES["wozniak"]["system_prompt"]
+_MAX_VARIANT_WORDS = 26
+_MAX_VARIANT_CHARS = 180
 
 VARIANT_USER_TEMPLATE = """Original question: {question}
 
@@ -141,19 +241,6 @@ Original answer: {answer}
 Generate one variant question that tests the same concept."""
 
 
-_MAX_VARIANT_WORDS = 26
-_MAX_VARIANT_CHARS = 180
-
-_VARIANT_SHORTEN_SYSTEM_PROMPT = """You shorten flashcard questions while preserving the tested concept.
-
-Rules:
-- Keep the same answer target as the original.
-- Keep one clear ask only.
-- Keep wording plain and concrete.
-- Output must be <= 26 words and <= 180 characters.
-- Return ONLY the rewritten question text.
-"""
-
 _VARIANT_SHORTEN_TEMPLATE = """Original question: {question}
 
 Original answer: {answer}
@@ -163,6 +250,17 @@ Current variant: {variant}
 Rewrite it to be concise while preserving the same answer target."""
 
 
+def _bloom_cognitive_level(card_ivl: int) -> str:
+    """Map card interval (days) to a Bloom's taxonomy level string."""
+    if card_ivl <= 7:
+        return "Remember/Understand"
+    if card_ivl <= 30:
+        return "Understand/Apply"
+    if card_ivl <= 90:
+        return "Apply/Analyze"
+    return "Analyze/Evaluate"
+
+
 def _normalize_variant_text(text: str) -> str:
     """Normalize whitespace in generated variant text."""
     if not text:
@@ -170,52 +268,74 @@ def _normalize_variant_text(text: str) -> str:
     return re.sub(r"\s+", " ", str(text)).strip()
 
 
-def _variant_too_long(text: str) -> bool:
-    """True when variant exceeds configured word/char limits."""
+def _variant_too_long(text: str, max_words: int = 26, max_chars: int = 180) -> bool:
+    """True when variant exceeds word/char limits."""
     if not text:
         return False
-    return len(text.split()) > _MAX_VARIANT_WORDS or len(text) > _MAX_VARIANT_CHARS
+    return len(text.split()) > max_words or len(text) > max_chars
 
 
-def _hard_limit_variant(text: str) -> str:
+def _hard_limit_variant(text: str, max_words: int = 26, max_chars: int = 180) -> str:
     """Force a variant into length limits as a final fallback."""
     variant = _normalize_variant_text(text)
     if not variant:
         return ""
 
     q_idx = variant.find("?")
-    if q_idx != -1 and (q_idx + 1) <= _MAX_VARIANT_CHARS:
+    if q_idx != -1 and (q_idx + 1) <= max_chars:
         variant = variant[: q_idx + 1].strip()
 
     words = variant.split()
-    if len(words) > _MAX_VARIANT_WORDS:
-        variant = " ".join(words[:_MAX_VARIANT_WORDS]).rstrip(" ,;:.")
+    if len(words) > max_words:
+        variant = " ".join(words[:max_words]).rstrip(" ,;:.")
 
-    if len(variant) > _MAX_VARIANT_CHARS:
-        clipped = variant[:_MAX_VARIANT_CHARS]
+    if len(variant) > max_chars:
+        clipped = variant[:max_chars]
         if " " in clipped:
             clipped = clipped.rsplit(" ", 1)[0]
         variant = clipped.rstrip(" ,;:.")
 
     if variant and not variant.endswith("?"):
-        if len(variant) >= _MAX_VARIANT_CHARS:
-            variant = variant[: _MAX_VARIANT_CHARS - 1].rstrip(" ,;:.")
+        if len(variant) >= max_chars:
+            variant = variant[: max_chars - 1].rstrip(" ,;:.")
         variant = variant + "?"
 
     return variant
 
 
-def generate_variant(question: str, answer: str, config: dict) -> Optional[dict]:
+def generate_variant(question: str, answer: str, config: dict,
+                     card_ivl: int = 0) -> Optional[dict]:
     """
     Generate a variant question and expected answer via LLM.
 
-    Returns {"question": str, "expected_answer": str} or None on failure.
+    Randomly selects a style from config["variant_style"] (list or string).
+    Returns {"question": str, "expected_answer": str, "variant_style": str}
+    or None on failure.
     """
+    import random as _rand
+
     api_key = config.get("api_key", "")
     if not api_key:
         return None
 
     model = config.get("model", DEFAULT_MODEL)
+
+    # Pick a style
+    style_cfg = config.get("variant_style", ["wozniak"])
+    if isinstance(style_cfg, str):
+        style_cfg = [style_cfg]
+    style_name = _rand.choice(style_cfg) if style_cfg else "wozniak"
+    style = VARIANT_STYLES.get(style_name, VARIANT_STYLES["wozniak"])
+
+    max_words = style["max_words"]
+    max_chars = style["max_chars"]
+
+    # Build system prompt (Bloom's needs cognitive level interpolation)
+    system = style["system_prompt"]
+    if style_name == "bloom":
+        level = _bloom_cognitive_level(card_ivl)
+        system = system.format(cognitive_level=level)
+    system = system.strip()
 
     domain_ctx = ""
     if config.get("system_prompt"):
@@ -226,8 +346,6 @@ def generate_variant(question: str, answer: str, config: dict) -> Optional[dict]
         answer=answer,
         domain_context=domain_ctx,
     )
-
-    system = VARIANT_SYSTEM_PROMPT.strip()
 
     raw = _call_api(api_key, model, system, user_msg, max_tokens=300)
     if not raw:
@@ -246,29 +364,38 @@ def generate_variant(question: str, answer: str, config: dict) -> Optional[dict]
         return None
 
     # One shorten pass for overlong generations before hard-capping.
-    if _variant_too_long(variant):
+    if _variant_too_long(variant, max_words, max_chars):
+        shorten_system = (
+            "You shorten flashcard questions while preserving the tested concept.\n\n"
+            "Rules:\n"
+            "- Keep the same answer target as the original.\n"
+            "- Keep one clear ask only.\n"
+            "- Keep wording plain and concrete.\n"
+            f"- Output must be <= {max_words} words and <= {max_chars} characters.\n"
+            "- Return ONLY the rewritten question text."
+        )
         shorten_user_msg = _VARIANT_SHORTEN_TEMPLATE.format(
             question=question,
             answer=answer,
             variant=variant,
         )
         shortened = _call_api(
-            api_key,
-            model,
-            _VARIANT_SHORTEN_SYSTEM_PROMPT.strip(),
-            shorten_user_msg,
-            max_tokens=120,
+            api_key, model, shorten_system, shorten_user_msg, max_tokens=120,
         )
         if shortened:
             variant = _normalize_variant_text(shortened)
 
-    if _variant_too_long(variant):
-        variant = _hard_limit_variant(variant)
+    if _variant_too_long(variant, max_words, max_chars):
+        variant = _hard_limit_variant(variant, max_words, max_chars)
 
     if not variant:
         return None
 
-    return {"question": variant, "expected_answer": expected_answer}
+    return {
+        "question": variant,
+        "expected_answer": expected_answer,
+        "variant_style": style_name,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +845,18 @@ def grade_response(
             answer=canonical_answer,
             response=user_response,
         )
+
+    # Append style-specific grading guidance
+    variant_style = str(config.get("_variant_style", config.get("variant_style", "wozniak")))
+    if isinstance(variant_style, list):
+        variant_style = variant_style[0] if variant_style else "wozniak"
+    style = VARIANT_STYLES.get(variant_style, VARIANT_STYLES["wozniak"])
+    addendum = style.get("grading_addendum", "")
+    if addendum:
+        if variant_style == "bloom":
+            card_ivl = int(config.get("_grading_card_ivl", 0))
+            addendum = addendum.format(cognitive_level=_bloom_cognitive_level(card_ivl))
+        system = system + "\n\n" + addendum
 
     raw = _call_api(
         api_key,
