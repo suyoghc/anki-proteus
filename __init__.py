@@ -107,9 +107,7 @@ def init_addon():
         showInfo("Proteus: No API key configured.\n\n"
                  "Set it in: Tools → Add-ons → select Proteus → Config")
 
-    # First-run: prompt for learner context
-    if CONFIG.get("api_key") and not CONFIG.get("learner_context"):
-        QTimer.singleShot(1000, lambda: show_learner_context_dialog(first_run=True))
+
 
     # Register hooks
     gui_hooks.card_will_show.append(on_card_will_show)
@@ -2209,7 +2207,7 @@ def _budget_bar_text(pct: int) -> str:
     )
 
 
-def show_learner_context_dialog(first_run=False):
+def show_learner_context_dialog():
     """Show a dialog for the learner to describe themselves and their current focus."""
     from aqt.qt import QDialog, QVBoxLayout, QLabel, QPushButton, QPlainTextEdit
 
@@ -2218,22 +2216,12 @@ def show_learner_context_dialog(first_run=False):
     dlg.setMinimumWidth(420)
     layout = QVBoxLayout()
 
-    if first_run:
-        layout.addWidget(QLabel(
-            "<b>Welcome to Proteus!</b><br><br>"
-            "Tell me about yourself in 1-2 sentences. This helps generate\n"
-            "questions that are personally relevant to you.<br><br>"
-            "<span style='color: #666; font-size: 0.9em;'>"
-            "Example: \"PhD student studying Bayesian methods for educational\n"
-            "measurement. Preparing for qualifying exam. I use Stan and R.\"</span>"
-        ))
-    else:
-        layout.addWidget(QLabel(
-            "<b>About Me</b><br>"
-            "<span style='color: #666; font-size: 0.9em;'>"
-            "Describe yourself and what's currently relevant. "
-            "This context shapes how questions are framed.</span>"
-        ))
+    layout.addWidget(QLabel(
+        "<b>About Me</b><br>"
+        "<span style='color: #666; font-size: 0.9em;'>"
+        "Describe yourself and what's currently relevant. "
+        "This context shapes how questions are framed.</span>"
+    ))
 
     text_edit = QPlainTextEdit()
     text_edit.setPlainText(CONFIG.get("learner_context", ""))
@@ -2242,7 +2230,7 @@ def show_learner_context_dialog(first_run=False):
     layout.addWidget(text_edit)
 
     save_btn = QPushButton("Save")
-    skip_btn = QPushButton("Skip" if first_run else "Cancel")
+    skip_btn = QPushButton("Cancel")
 
     def on_save():
         ctx = text_edit.toPlainText().strip()
