@@ -19,32 +19,80 @@ Anki's scheduler is completely untouched — FSRS/SM-2 works as usual. The varia
 Standard Anki flow with transformed questions. Fast, zero friction.
 
 ### Freeform mode
-After seeing the variant question, you get a text input area. Speak your answer using a dictation tool like [Wispr Flow](https://www.wispr.flow/) (or type it), then press Enter. The LLM evaluates your response and shows feedback inline on the question page — AI answer target plus a coverage table. Then flip to see canonical feedback and the original card.
+After seeing the variant question, you get a text input area with a submit button. Speak your answer using a dictation tool like [Wispr Flow](https://www.wispr.flow/) (or type it), then press Enter or click the submit button. The AI answer target appears instantly (pre-fetched), and feedback fills in when the grading call completes. Then flip to see canonical feedback and the original card.
 
 Toggle between modes anytime with **Ctrl+Shift+V** (Cmd+Shift+V on macOS) or in the config.
 
 ## Features
 
-- **Batch prefetching**: At review start, pre-generates variants for upcoming cards in parallel background threads
+- **Batch prefetching**: Pre-generates variants + AI answer targets for upcoming cards in parallel background threads
 - **Variant caching**: SQLite-backed cache stores multiple variants per card, reducing live API calls
-- **Dual-perspective grading**: Freeform responses are evaluated from two perspectives — against the AI answer target (shown on the question page) and against the canonical flashcard answer (shown on the answer page). Configurable via `feedback_mode`.
-- **AI answer target**: A concise AI-generated expected answer is shown on the question page after submitting a freeform response
-- **Card ideas**: Save interesting variant questions as card ideas during review (bookmark button), then review and create new cards from them via **Tools → Proteus: Card Ideas**
-- **Human-in-the-loop editing**: In the Card Ideas dialog, edit draft wording, apply reason tags, and regenerate with targeted instructions (`Shorter`, `More Concrete`, `Less Jargon`, `Add Contrast Case`) before accepting/rejecting
-- **Feedback-gated creation**: `Create Card` is enabled only for ideas that include freeform grading feedback (from Wispr/typed response)
-- **Quick master toggle**: `Ctrl+Shift+P` (Cmd+Shift+P on macOS) toggles Proteus variant generation on/off for the current session
-- **Back to question**: `Ctrl+Shift+Left` (Cmd+Shift+Left on macOS) navigates from the answer side back to the question side with freeform state preserved
-- **Usage budget**: Set a dollar cap to limit API spend per session
-- **Image card safety**: Automatically skips cards with insufficient text (e.g., Image Occlusion)
-- **Feedback buttons**: Rate variant quality with thumbs up/down to track what works
+- **Configurable variant styles**: 10 research-backed question styles selectable via **Tools → Proteus → Variant Styles...**
+- **Personal learning context**: Describe yourself and your current focus to get personally relevant question framing
+- **Dual-perspective grading**: Freeform responses evaluated against AI answer target (question page) and canonical answer (answer page). Configurable via `feedback_mode`.
+- **Pre-fetched AI answer targets**: Expected answers generated alongside variants — shown instantly on submit, no waiting for grading
+- **Card ideas**: Save interesting variant questions as card ideas (bookmark button), review and create cards from them via Card Ideas dialog
+- **Quick save**: 💾 button directly saves variant Q+A as a new card. 📋 button opens Add Note pre-filled. ➕ button opens blank Add Note.
+- **Human-in-the-loop editing**: In Card Ideas dialog, edit draft wording, apply reason tags, regenerate with targeted instructions
+- **Quick master toggle**: `Ctrl+Shift+P` toggles Proteus on/off for the current session
+- **Back to question**: `Ctrl+Shift+Left` navigates from answer side back to question side with state preserved
+- **Refresh variant cache**: Clear and regenerate all cached variants from the Proteus menu
+- **Usage budget**: Set a dollar cap to track API spend
+
+## Variant Styles
+
+Selectable via **Tools → Proteus → Variant Styles...** — pick multiple and each card randomly gets one.
+
+### Core
+| Style | What it does | Based on |
+|---|---|---|
+| **Wozniak + Matuschak** | One concept, unambiguous, retrieval-focused | Minimum information principle |
+| **Bloom's Taxonomy** | Cognitive level scales with card maturity (interval) | Bloom's revised taxonomy |
+| **Elaborative** | Why/how questions forcing causal reasoning | Elaborative interrogation research |
+| **Feynman** | "Explain simply" — clarity over precision | Feynman technique |
+| **Cloze Generation** | Fill-in-the-blank producing the key term | Generation effect (desirable difficulties) |
+
+### Contrast & Context
+| Style | What it does | Based on |
+|---|---|---|
+| **Discrimination** | "How does X differ from Y?" with genuinely confusable concepts | Contrast/discrimination learning |
+| **Real-World Examples** | Identify the concept from a real named case | Concrete examples principle |
+
+### Transfer
+| Style | What it does | Based on |
+|---|---|---|
+| **Transfer: Code** | Debug, predict, or identify technique in a code snippet | Transfer-appropriate processing |
+| **Transfer: Stats** | Interpret model output or diagnose assumptions | Transfer-appropriate processing |
+| **Transfer: Math** | Find error or identify technique in an equation | Transfer-appropriate processing |
+
+### Visual
+| Style | What it does | Based on |
+|---|---|---|
+| **Diagram Labeling** | SVG diagram with labeled blanks (A, B, C) to identify | Dual coding theory |
+
+### Per-style length limits
+| Style | Max words | Max chars |
+|---|---|---|
+| Wozniak + Matuschak | 26 | 180 |
+| Bloom, Elaborative, Discrimination, Cloze, Transfer | 30 | 210 |
+| Real-World | 35 | 250 |
+| Feynman | 50 | 350 |
+
+### Bloom's maturity mapping
+| Card interval | Cognitive level |
+|---|---|
+| ≤ 7 days | Remember / Understand |
+| ≤ 30 days | Understand / Apply |
+| ≤ 90 days | Apply / Analyze |
+| > 90 days | Analyze / Evaluate |
 
 ## Behavior Decisions
 
 ### 1) Master toggles
 
-- **Proteus on/off**: `Ctrl+Shift+P` (Cmd+Shift+P on macOS) toggles variant generation for the current session.
-- **Review mode**: `Ctrl+Shift+V` (Cmd+Shift+V on macOS) toggles `flip` vs `freeform`.
-- **Back to question**: `Ctrl+Shift+Left` (Cmd+Shift+Left on macOS) navigates from the answer side back to the question side with freeform state preserved.
+- **Proteus on/off**: `Ctrl+Shift+P` (Cmd+Shift+P on macOS)
+- **Review mode**: `Ctrl+Shift+V` (Cmd+Shift+V on macOS) toggles `flip` vs `freeform`
+- **Back to question**: `Ctrl+Shift+Left` (Cmd+Shift+Left on macOS)
 
 ### 2) Which cards can get a variant
 
@@ -58,45 +106,34 @@ A card is eligible only if all checks pass:
 - interval meets `min_interval_days`
 - random roll passes `transform_percent`
 
-In addition, review-time replacement uses cached variants only (the UI is never blocked by a synchronous generation call).
+Review-time replacement uses cached variants only (the UI is never blocked by a synchronous API call).
 
 ### 3) Feedback modes
 
 `feedback_mode` controls which evaluation perspectives are available:
 
-- `"ai"` — question page only. Your response is compared against the AI-generated answer target.
-- `"canonical"` — answer page only. Your response is compared against the canonical flashcard answer.
-- `"both"` — question page shows AI-relative feedback; answer page shows canonical-relative feedback. One API call returns both.
+- `"ai"` — question page only. Response compared against AI answer target.
+- `"canonical"` — answer page only. Response compared against canonical flashcard answer.
+- `"both"` — both perspectives. One API call returns both.
 
-### 4) Grading semantics (coverage-first)
+### 4) Grading semantics
 
-- Target coverage is computed from point sets and shown as a grayscale donut.
-- The donut uses grayscale by design:
-  - **dark gray** = covered portion
-  - **light gray** = uncovered portion
-- If the variant is **misaligned**, correctness verdicts are suppressed and the UI states:
-  - `Question drifted from canonical target.`
+- Coverage donut uses grayscale (dark = covered, light = uncovered)
+- If the variant is **misaligned**: `Question drifted from canonical target.`
+- AI coverage donut controlled by `show_ai_coverage` config (default: off)
 
-### 5) Coverage consistency policy
+### 5) Variant generation
 
-- Coverage is derived from point sets when points are available.
-- Gaps are represented in `Remaining target points` / `Missed` columns.
+- All styles enforce short, direct sentences (max 12 words per sentence)
+- No preamble, no subordinate clauses, no filler words
+- Visual styles (diagram, transfer) can opt out if the concept isn't suited — falls back to text
 
-### 6) Variant style and length guardrails
+### 6) Card creation buttons
 
-Variant generation prioritizes clarity, engagement, and minimalism. Variants must never be longer than the original question.
-
-Hard length limits:
-
-- **<= 26 words** and **<= 180 characters**
-- one automatic shorten pass runs if over limit
-- if still too long, a hard fallback truncation enforces limits
-
-### 7) Card Ideas creation behavior
-
-- `Create Card` opens Anki’s **Add Note** dialog with prefilled Front/Back fields.
-- It creates a **new note/card**; it does not edit the original reviewed card.
-- Creation requires freeform feedback to be present.
+- 🔖 Save card idea (for later review in Card Ideas dialog)
+- ➕ Add new card (blank Add Note dialog)
+- 💾 Quick save (directly saves variant Q + AI answer as new card)
+- 📋 Create from variant (pre-filled Add Note dialog for editing)
 
 ## Compatibility
 
@@ -114,7 +151,7 @@ Tested on Anki 25.02+ (Python 3.9, Qt 6). Uses `gui_hooks.card_will_show` with c
 
 4. Configure your API key:
    - **Tools → Add-ons** → select "Proteus" → **Config**
-   - Set `"api_key"` to your Anthropic API key (must be in double quotes)
+   - Set `"api_key"` to your Anthropic API key
 
 ## Configuration
 
@@ -131,130 +168,110 @@ Edit via **Tools → Add-ons → Config** or directly in `config.json`:
     "min_interval_days": 0,
     "max_cached_variants": 3,
     "system_prompt": "",
+    "learner_context": "",
     "exclude_note_types": ["Image Occlusion"],
+    "variant_style": ["wozniak_matuschak"],
     "batch_prefetch_count": 15,
     "batch_prefetch_concurrency": 3,
     "show_prefetch_progress": true,
     "debug_logging": false,
     "usage_budget": 5.00,
-    "submit_delay_ms": 750,
     "grading_model": "",
     "grading_max_tokens": 280,
     "grading_timeout_s": 10,
-    "feedback_mode": "both"
+    "feedback_mode": "both",
+    "show_ai_coverage": false
 }
 ```
 
 ### Key settings
 
-**`active_decks`**: Filter which decks get variants. Supports partial matching — `["Immunology"]` will match any deck with "Immunology" in the name. Leave empty for all decks.
+**`variant_style`**: List of styles to sample from. Each card gets a randomly selected style. Set via **Tools → Proteus → Variant Styles...** or in config. Valid values: `wozniak_matuschak`, `bloom`, `elaborative`, `feynman`, `cloze_generation`, `discrimination`, `real_world`, `transfer_code`, `transfer_stats`, `transfer_math`, `diagram_labeling`.
 
-**`enabled`**: Master enable flag for Proteus variant generation. Shortcut toggle (`Ctrl/Cmd+Shift+P`) changes this in-memory for the current session.
+**`learner_context`**: Personal context injected into all variant prompts. Describe yourself and what's currently relevant. Set via the Variant Styles dialog.
 
-**`transform_percent`**: Set below 100 to occasionally see original questions as a sanity check. 80 means ~1 in 5 reviews shows the original.
+**`feedback_mode`**: Controls grading perspectives. `"both"` (default), `"ai"`, or `"canonical"`.
 
-**`min_interval_days`**: Pattern-matching risk is highest on mature cards. Set to 7 or 14 to only generate variants for cards you've already reviewed several times.
+**`show_ai_coverage`**: Show AI coverage donut on question side. Default: `false`.
 
-**`system_prompt`**: Domain-specific context that improves variant quality. Examples:
+**`active_decks`**: Filter which decks get variants. Supports partial matching. Leave empty for all decks.
 
-```
-"The learner is a medical student. Frame scenarios using
-clinical vignettes and patient presentations."
-```
+**`transform_percent`**: Set below 100 to occasionally see original questions. 80 = ~1 in 5 reviews shows the original.
 
-**`exclude_note_types`**: Skip variant generation for specific note types. Image Occlusion is excluded by default since image-based cards lack sufficient text.
+**`min_interval_days`**: Only transform cards above this interval. Set to 7 or 14 for mature cards only.
 
-**`batch_prefetch_count`**: Number of upcoming cards to pre-generate variants for at review session start. Higher values reduce mid-review API latency.
+**`system_prompt`**: Domain-specific context for variant quality.
 
-**`batch_prefetch_concurrency`**: Number of parallel worker threads for batch prefetching.
+**`grading_model`**: Optional faster/cheaper model for grading only.
 
-**`show_prefetch_progress`**: Show a progress indicator during batch prefetching.
+**`grading_max_tokens`**: Max output tokens for grading. Default: 280.
 
-**`debug_logging`**: Write detailed diagnostic logs to `proteus_diag.log` in the addon folder.
-
-**`usage_budget`**: API spend target (in USD). The addon tracks estimated token costs and displays a progress bar against this budget in **Tools → Proteus: Usage Stats**. This is informational — it does not automatically stop generation.
-
-**`submit_delay_ms`**: Delay in milliseconds between pressing Enter in freeform mode and flipping the card. Gives the grading API call a head start so feedback arrives sooner. Default: 750.
-
-**`grading_model`**: Optional model override used only for grading. Leave empty to use `model`. If you have access to a faster model, set it here.
-
-**`grading_max_tokens`**: Max output tokens for grading response. Default: 280 (sized for the full grading schema).
-
-**`grading_timeout_s`**: Fail-fast timeout for grading requests. If exceeded, the UI shows a fallback message so it doesn't stay on "Evaluating...". Default: 10.
-
-**`feedback_mode`**: Controls which grading perspectives are shown. Default: `"both"`.
-- `"ai"` — one grading call evaluating your response against the AI-generated answer target. Feedback appears on the question page only.
-- `"canonical"` — one grading call evaluating against the canonical flashcard answer. Feedback appears on the answer page only.
-- `"both"` — one grading call returning both perspectives. Question page shows AI-relative feedback; answer page shows canonical-relative feedback. Uses ~50% more output tokens than single-perspective modes.
+**`debug_logging`**: Write diagnostic logs to `proteus_diag.log`.
 
 ## Coverage & Gaps Output Schema
 
-Freeform grading payloads are normalized around these keys:
-
 **Canonical perspective** (answer page):
 - `alignment`: `aligned | partial | misaligned`
-- `alignment_note`: short explanation
-- `canonical_points`: key target points from canonical answer
-- `covered_points`: canonical points covered by learner response
-- `missed_points`: canonical points not covered by learner response
-- `coverage_pct`: coverage percentage derived from canonical point overlap
+- `canonical_points`, `covered_points`, `missed_points`, `coverage_pct`
 
 **AI answer perspective** (question page, `"ai"` or `"both"` mode):
-- `expected_answer`: concise AI answer target for the shown variant
-- `ai_covered_points`: expected-answer points the learner addressed
-- `ai_missed_points`: expected-answer points the learner missed
-- `ai_coverage_pct`: coverage percentage derived from expected-answer point overlap
+- `expected_answer`, `ai_covered_points`, `ai_missed_points`, `ai_coverage_pct`
 
-**Shared**:
-- `learning_feedback`: related conceptual notes
-- `incorrect`: incorrect claims in learner response
-- `overall`: one-line summary
+**Shared**: `learning_feedback`, `incorrect`, `overall`
 
 ## Cost
 
 - **Flip mode**: ~1 API call per transformed review (cached variants reduce this)
 - **Freeform mode**: ~1 additional API call per review for grading
-- Using `claude-sonnet-4-20250514` at ~300 tokens per variant ≈ $0.003/variant
+- Text variant: ~$0.003/variant. Visual/transfer: ~$0.006-0.010/variant (more output tokens)
 - Freeform grading: ~$0.006/call (`"ai"` or `"canonical"`), ~$0.009/call (`"both"`)
-- 50 reviews/day ≈ $0.12–0.25/day flip, $0.30–0.45/day freeform depending on `feedback_mode`
-
-Pre-fetching and caching minimize live API calls during review.
+- 50 reviews/day ≈ $0.12–0.25/day flip, $0.30–0.50/day freeform
 
 ## Keyboard Shortcuts
 
-- **Ctrl+Shift+P**: Toggle Proteus generation on/off (`Cmd+Shift+P` on macOS)
+- **Ctrl+Shift+P**: Toggle Proteus on/off (`Cmd+Shift+P` on macOS)
 - **Ctrl+Shift+V**: Toggle flip/freeform mode (`Cmd+Shift+V` on macOS)
 - **Ctrl+Shift+Left**: Back to question from answer side (`Cmd+Shift+Left` on macOS)
-- **Enter** (in freeform textarea): Submit response and start grading (no auto-flip)
+- **Enter** / submit button (in freeform): Submit response and start grading
+
+## Tools Menu
+
+```
+Tools → Proteus →
+    Card Ideas
+    Usage Stats
+    Variant Styles...
+    Refresh Variant Cache
+    ─────────────
+    Toggle On/Off         Ctrl+Shift+P
+    Toggle Flip/Freeform  Ctrl+Shift+V
+    Back to Question      Ctrl+Shift+Left
+```
 
 ## Files
 
 ```
 anki_proteus/
 ├── __init__.py         # Hooks, UI injection, review flow
-├── generator.py        # LLM API calls (variant generation + grading)
-├── cache.py            # SQLite cache for variants + card ideas
+├── generator.py        # LLM API calls, variant styles, grading
+├── cache.py            # SQLite cache (schema v9) for variants + card ideas
 ├── prefetch.py         # Single-card background pre-fetching thread
 ├── batch_prefetch.py   # Parallel batch pre-generation at session start
 ├── config.json         # Default configuration
 ├── manifest.json       # Anki addon metadata
-├── tests/test_core.py  # Unit tests
+├── tests/test_core.py  # Unit tests (55 tests)
 └── README.md
 ```
 
 ## Development
 
-Initial prototype generated with Claude, iterated with Claude Code.
-
-For development, symlink the repo into your addons folder:
+Symlink the repo into your addons folder:
 
 ```bash
 ln -s /path/to/anki-proteus ~/Library/Application\ Support/Anki2/addons21/anki_proteus
 ```
 
-Changes take effect on Anki restart. The addon initializes via `profile_did_open` hook with a QTimer fallback for single-profile setups.
-
-Run tests:
+Changes take effect on Anki restart. Run tests:
 
 ```bash
 pytest -v
@@ -262,10 +279,8 @@ pytest -v
 
 ## Future Directions
 
-These aren't built yet but the architecture supports them:
-
-- **Concept grouping**: Tag cards with a concept ID to avoid generating variants that overlap with sibling cards
-- **Knowledge graph**: Prerequisite-aware variant generation and diagnostic backtracking on failures
-- **Transformation taxonomy**: Weighted random selection of variant types (rephrase, apply-to-scenario, find-the-error, explain-to-a-student)
-- **Difficulty scaling**: Tie variant type to card maturity — rephrases for new cards, application scenarios for mature ones
-- **Variant quality feedback**: Flag bad variants to improve prompts over time
+- **Web search for discrimination**: Search for commonly confused concepts to build better contrasts
+- **Chrome extension**: Generate flashcards from web page content using the same prompt engineering
+- **Visual styles**: Error detection, flowchart completion, graph interpretation
+- **Keyword similarity**: Client-side sanity-check on LLM coverage verdicts
+- **Pretesting**: Show variants before first review (productive failure)
