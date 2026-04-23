@@ -15,6 +15,8 @@ import os
 import random
 import re
 import time as _time
+from dataclasses import dataclass
+from typing import Optional
 from aqt import mw, gui_hooks
 from aqt.utils import showInfo, tooltip
 from aqt.qt import QAction, QMenu, QThread, pyqtSignal, QObject
@@ -22,7 +24,8 @@ from aqt.webview import AnkiWebView
 
 from .generator import (
     generate_variant, grade_response, get_usage, reset_usage,
-    diag_log, DEFAULT_MODEL,
+    diag_log, DEFAULT_MODEL, register_error_reporter,
+    is_deprecated_model,
 )
 from .cache import VariantCache
 from .prefetch import PrefetchWorker
@@ -39,6 +42,37 @@ CONFIG_PATH = os.path.join(ADDON_DIR, "config.json")
 def _log(msg: str):
     """Append a timestamped line to the diag log (only when debug_logging is on)."""
     diag_log(msg, debug=CONFIG.get("debug_logging", False))
+
+def _migrate_variant_style(stored: dict) -> bool:
+    """Rewrite legacy 'wozniak_matuschak' style to split ['wozniak', 'matuschak_contextualized'].
+
+    Mutates `stored` in place. Returns True when a change was made so the caller
+    can persist the updated config.
+    """
+    style = stored.get("variant_style")
+    if style is None:
+        return False
+    # Accept both list and string forms, matching how generate_variant reads the config.
+    if isinstance(style, str):
+        if style == "wozniak_matuschak":
+            stored["variant_style"] = ["wozniak", "matuschak_contextualized"]
+            return True
+        return False
+    if isinstance(style, list) and "wozniak_matuschak" in style:
+        migrated = []
+        for name in style:
+            if name == "wozniak_matuschak":
+                if "wozniak" not in migrated:
+                    migrated.append("wozniak")
+                if "matuschak_contextualized" not in migrated:
+                    migrated.append("matuschak_contextualized")
+            else:
+                if name not in migrated:
+                    migrated.append(name)
+        stored["variant_style"] = migrated
+        return True
+    return False
+
 
 def load_config():
     """Load config, merging user overrides with defaults."""
@@ -63,13 +97,23 @@ def load_config():
         "grading_max_tokens": 280,         # room for full grading schema
         "grading_timeout_s": 10,           # fail fast if grading is slow
         "learner_context": "",              # personal context injected into prompts
-        "variant_style": ["wozniak_matuschak"],       # list of styles to sample from
+        "variant_style": ["wozniak"],       # list of styles to sample from
         "feedback_mode": "both",           # "ai", "canonical", or "both"
         "show_ai_coverage": False,         # show AI coverage donut on question side
     }
-    conf = mw.addonManager.getConfig(__name__)
-    if conf:
-        defaults.update(conf)
+    conf = mw.addonManager.getConfig(__name__) or {}
+
+    # One-time migration: the old "wozniak_matuschak" style was split in
+    # April 2026 into two separate styles. Rewrite the stored config so
+    # existing users keep the fused-style behaviour.
+    if _migrate_variant_style(conf):
+        try:
+            mw.addonManager.writeConfig(__name__, conf)
+            diag_log("config: migrated wozniak_matuschak → [wozniak, matuschak_contextualized]")
+        except Exception as e:
+            diag_log(f"config: migration writeConfig failed: {e}")
+
+    defaults.update(conf)
     return defaults
 
 CONFIG = {}
@@ -81,31 +125,130 @@ CONFIG = {}
 _cache: VariantCache = None
 _prefetch_worker: PrefetchWorker = None
 _batch_manager: BatchPrefetchManager = None
-_current_variant: str = None          # variant being shown right now
-_current_variant_id: int = None       # DB row id for feedback
-_current_card_id: int = None
-_current_expected_answer: str = ""    # pre-fetched expected answer
-_current_variant_style: str = ""     # style used for the current variant
-_current_svg: str = ""               # SVG markup for visual styles
+
+
+@dataclass
+class CurrentCardState:
+    """State for the card currently on-screen.
+
+    Consolidates what used to be six loose module globals. Every field
+    describes a property of the card the reviewer is looking at *right now*;
+    reset() is called when a new card appears, adopt() when a cached variant
+    is loaded onto it.
+
+    A single mutable instance (_current below) lets callers just read/write
+    attributes without juggling `global` declarations.
+    """
+    variant: Optional[str] = None          # variant question text being shown
+    variant_id: Optional[int] = None       # DB row id (for feedback buttons)
+    card_id: Optional[int] = None          # Anki card id
+    expected_answer: str = ""              # pre-fetched canonical answer
+    variant_style: str = ""                # style key used to generate it
+    svg: str = ""                          # SVG markup (visual styles only)
+
+    def reset(self, card_id: Optional[int] = None) -> None:
+        """Clear variant-specific fields. card_id is set to the new card."""
+        self.variant = None
+        self.variant_id = None
+        self.expected_answer = ""
+        self.variant_style = ""
+        self.svg = ""
+        self.card_id = card_id
+
+    def adopt(self, variant_id, variant, expected_answer, variant_style, svg) -> None:
+        """Populate from a cache.get_variant() tuple."""
+        self.variant_id = variant_id
+        self.variant = variant
+        self.expected_answer = expected_answer
+        self.variant_style = variant_style
+        self.svg = svg
+
+
+_current = CurrentCardState()
 _user_response: str = ""              # captured from freeform text input
 _evaluation_text: str = None          # LLM grading result
 _grading_worker = None                # background grading QThread
 _grading_watchdog_seq: int = 0        # invalidate prior grading watchdog timers
 _ideas_saved_this_session: int = 0
 _idea_orphan_workers = []             # workers kept alive after ideas dialog closes
+_api_error_shown_kinds = set()        # dedupe API error surfacing per session
+
+# ---------------------------------------------------------------------------
+# API error surfacing
+# ---------------------------------------------------------------------------
+
+_API_ERROR_MESSAGES = {
+    "auth": (
+        "Proteus: Anthropic API key appears invalid or unauthorized.\n\n"
+        "Check Tools → Add-ons → Proteus → Config."
+    ),
+    "rate_limit": "Proteus: API rate limit hit. Variants may be delayed.",
+    "server": "Proteus: Anthropic API is returning 5xx errors. Try again shortly.",
+    "network": "Proteus: Network error reaching Anthropic API.",
+    "bad_request": "Proteus: Anthropic API rejected a request (see proteus_diag.log).",
+}
+
+
+def _on_api_error(kind: str, detail: str):
+    """Receive API error notifications from generator._call_api.
+
+    Dedupes per session per kind so a run of 429s doesn't spam the user. Uses
+    showInfo for auth failures (must-fix) and tooltip for transient problems.
+    Must be safe to call from a worker thread — hops back to the main thread
+    via mw.taskman.run_on_main when available.
+    """
+    global _api_error_shown_kinds
+    if kind in _api_error_shown_kinds:
+        return
+    _api_error_shown_kinds.add(kind)
+
+    message = _API_ERROR_MESSAGES.get(kind, f"Proteus: API error ({kind}).")
+
+    def _show():
+        try:
+            if kind == "auth":
+                showInfo(message)
+            else:
+                tooltip(message, period=5000)
+        except Exception:
+            pass
+
+    try:
+        mw.taskman.run_on_main(_show)
+    except Exception:
+        # taskman unavailable (e.g., during tests) — best-effort inline call.
+        _show()
+
 
 # ---------------------------------------------------------------------------
 # Initialization
 # ---------------------------------------------------------------------------
 
 def init_addon():
-    global CONFIG, _cache
+    global CONFIG, _cache, _api_error_shown_kinds
     CONFIG = load_config()
     _cache = VariantCache(ADDON_DIR, max_variants=CONFIG.get("max_cached_variants", 3))
+    _api_error_shown_kinds = set()  # reset each profile load
+
+    # Route API failures from generator._call_api through our UI reporter.
+    register_error_reporter(_on_api_error)
 
     if not CONFIG.get("api_key"):
         showInfo("Proteus: No API key configured.\n\n"
                  "Set it in: Tools → Add-ons → select Proteus → Config")
+
+    # Warn once at profile load if the configured model is known-retired.
+    # The API would return a 404 on first use anyway, but the message is
+    # opaque; this catches it up front with actionable guidance.
+    configured_model = str(CONFIG.get("model", "")).strip()
+    if configured_model and is_deprecated_model(configured_model):
+        showInfo(
+            f"Proteus: model '{configured_model}' has been retired by Anthropic.\n\n"
+            f"Update it in: Tools → Add-ons → select Proteus → Config.\n"
+            f"Current default: {DEFAULT_MODEL}\n"
+            f"See https://docs.anthropic.com/en/docs/about-claude/models for the "
+            f"current list of supported snapshots."
+        )
 
 
 
@@ -155,7 +298,7 @@ def toggle_response_mode():
         CONFIG["response_mode"] = "freeform"
         tooltip("Proteus: freeform mode (speak/type responses)")
         # Inject freeform input via JS if a variant is currently shown
-        if _current_variant and mw.reviewer and mw.reviewer.web:
+        if _current.variant and mw.reviewer and mw.reviewer.web:
             escaped_html = _freeform_input_html().replace("\\", "\\\\").replace("`", "\\`")
             mw.reviewer.web.eval(f"""
             (function() {{
@@ -278,8 +421,6 @@ def should_prefetch(card) -> bool:
 
 def on_card_will_show(text: str, card, kind: str) -> str:
     """Intercept card display. Replace question with variant if eligible."""
-    global _current_variant, _current_variant_id, _current_card_id
-    global _current_expected_answer, _current_variant_style, _current_svg
     global _evaluation_text, _user_response
 
     try:
@@ -287,23 +428,19 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             global _returning_to_question
 
             # Re-showing the same card (back from answer) — preserve state
-            if _returning_to_question and card.id == _current_card_id and _current_variant:
+            if (_returning_to_question and card.id == _current.card_id
+                    and _current.variant):
                 _returning_to_question = False
-                styled_variant = _wrap_variant_html(_current_variant)
-                styled_variant += _feedback_buttons_html(card.id, _current_variant_id)
+                styled_variant = _wrap_variant_html(_current.variant)
+                styled_variant += _feedback_buttons_html(card.id, _current.variant_id)
                 if CONFIG.get("response_mode") == "freeform":
                     styled_variant += _freeform_input_html()
                 return styled_variant
 
             _returning_to_question = False
             _evaluation_text = None
-            _current_variant = None
-            _current_variant_id = None
-            _current_expected_answer = ""
-            _current_variant_style = ""
-            _current_svg = ""
             _user_response = ""
-            _current_card_id = card.id
+            _current.reset(card_id=card.id)
 
             if not should_transform(card):
                 return text
@@ -312,9 +449,9 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             result = _cache.get_variant(card.id)
 
             if result:
-                _current_variant_id, _current_variant, _current_expected_answer, _current_variant_style, _current_svg = result
-                styled_variant = _wrap_variant_html(_current_variant)
-                styled_variant += _feedback_buttons_html(card.id, _current_variant_id)
+                _current.adopt(*result)
+                styled_variant = _wrap_variant_html(_current.variant)
+                styled_variant += _feedback_buttons_html(card.id, _current.variant_id)
                 if CONFIG.get("response_mode") == "freeform":
                     styled_variant += _freeform_input_html()
                 return styled_variant
@@ -322,7 +459,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
             return text
 
         elif kind.endswith("Answer"):
-            if _current_variant and _current_variant_id is not None:
+            if _current.variant and _current.variant_id is not None:
                 eval_html = ""
                 if CONFIG.get("response_mode") == "freeform" and _user_response.strip():
                     eval_rendered = _render_saved_evaluation()
@@ -340,7 +477,7 @@ def on_card_will_show(text: str, card, kind: str) -> str:
                 return (
                     eval_html
                     + text
-                    + _feedback_buttons_html(card.id, _current_variant_id)
+                    + _feedback_buttons_html(card.id, _current.variant_id)
                 )
 
             return text
@@ -362,7 +499,7 @@ def on_question_shown(card):
 
 def _restore_freeform_state():
     """Re-inject saved response and evaluation into the question page after re-show."""
-    if not _user_response.strip() or not _current_variant:
+    if not _user_response.strip() or not _current.variant:
         return
     if not (mw.reviewer and mw.reviewer.web):
         return
@@ -514,9 +651,9 @@ def _card_ids_match(card_id):
     # type: (object) -> bool
     """Robustly compare signal card id with current card id."""
     try:
-        return int(card_id) == int(_current_card_id)
+        return int(card_id) == int(_current.card_id)
     except Exception:
-        return str(card_id) == str(_current_card_id)
+        return str(card_id) == str(_current.card_id)
 
 
 def _render_saved_evaluation(mode="answer"):
@@ -595,7 +732,7 @@ def _start_grading_watchdog(card_id):
         # type: () -> None
         if seq != _grading_watchdog_seq:
             return
-        if card_id != _current_card_id:
+        if card_id != _current.card_id:
             return
         if _grading_worker and _grading_worker.isRunning():
             _log(f"grading watchdog fired for card {card_id}")
@@ -847,7 +984,7 @@ def _on_grading_done(card_id, evaluation_json):
 
     if not still_on_card:
         _log(f"grading: discarding stale evaluation for card {card_id} "
-             f"(current is {_current_card_id})")
+             f"(current is {_current.card_id})")
         return
 
     _cancel_grading_watchdog()
@@ -913,7 +1050,7 @@ def _start_early_grading():
     """Start grading before answer flip so results arrive sooner."""
     global _grading_worker
 
-    if (not _current_variant or _current_card_id is None
+    if (not _current.variant or _current.card_id is None
             or not _user_response.strip() or not _cache):
         return
 
@@ -922,25 +1059,25 @@ def _start_early_grading():
         return
 
     try:
-        card = mw.col.get_card(_current_card_id)
+        card = mw.col.get_card(_current.card_id)
         answer_text = _extract_text(card, "answer")
         _cleanup_grading_worker()
-        _log(f"grading: early start for card {_current_card_id}")
+        _log(f"grading: early start for card {_current.card_id}")
         grading_cfg = dict(CONFIG)
-        grading_cfg["_variant_style"] = _current_variant_style
+        grading_cfg["_variant_style"] = _current.variant_style
         grading_cfg["_grading_card_ivl"] = card.ivl
         _grading_worker = _GradingWorker(
-            card_id=_current_card_id,
-            variant_question=_current_variant,
+            card_id=_current.card_id,
+            variant_question=_current.variant,
             user_response=_user_response,
             canonical_answer=answer_text,
             config=grading_cfg,
-            expected_answer=_current_expected_answer,
+            expected_answer=_current.expected_answer,
         )
         _grading_worker.done.connect(_on_grading_done)
         _grading_worker.failed.connect(_on_grading_failed)
         _grading_worker.start()
-        _start_grading_watchdog(_current_card_id)
+        _start_grading_watchdog(_current.card_id)
     except Exception as e:
         _log(f"early grading failed: {e}")
 
@@ -949,7 +1086,7 @@ def on_answer_shown(card):
     """After answer shown in freeform mode, trigger async grading if not already started."""
     global _grading_worker
 
-    if CONFIG.get("response_mode") != "freeform" or not _current_variant:
+    if CONFIG.get("response_mode") != "freeform" or not _current.variant:
         return
 
     _log(f"on_answer_shown freeform: card={card.id}, response={len(_user_response)} chars")
@@ -971,15 +1108,15 @@ def on_answer_shown(card):
     answer_text = _extract_text(card, "answer")
     _log(f"grading: starting worker for card {card.id}")
     grading_cfg = dict(CONFIG)
-    grading_cfg["_variant_style"] = _current_variant_style
+    grading_cfg["_variant_style"] = _current.variant_style
     grading_cfg["_grading_card_ivl"] = card.ivl
     _grading_worker = _GradingWorker(
         card_id=card.id,
-        variant_question=_current_variant,
+        variant_question=_current.variant,
         user_response=_user_response,
         canonical_answer=answer_text,
         config=grading_cfg,
-        expected_answer=_current_expected_answer,
+        expected_answer=_current.expected_answer,
     )
     _grading_worker.done.connect(_on_grading_done)
     _grading_worker.failed.connect(_on_grading_failed)
@@ -1008,7 +1145,7 @@ def on_js_message(handled: tuple, message: str, context):
                 rating = int(parts[1])
             else:
                 # Backward compatibility with older in-flight HTML.
-                variant_id = _current_variant_id
+                variant_id = _current.variant_id
                 rating = int(payload)
             if variant_id and _cache:
                 _cache.record_feedback(variant_id, rating)
@@ -1216,8 +1353,8 @@ def _wrap_variant_html(variant: str) -> str:
     from .generator import VARIANT_STYLES
     safe_variant = html.escape(variant)
     artifact_block = ""
-    if _current_svg:
-        style = VARIANT_STYLES.get(_current_variant_style, {})
+    if _current.svg:
+        style = VARIANT_STYLES.get(_current.variant_style, {})
         artifact_key = style.get("artifact_key", "svg")
         if artifact_key == "code":
             # Code/stats/math artifact — render as preformatted text
@@ -1225,13 +1362,13 @@ def _wrap_variant_html(variant: str) -> str:
                 '<pre style="margin-bottom: 12px; padding: 10px; background: #1e1e1e;'
                 ' color: #d4d4d4; border-radius: 6px; font-size: 0.9em;'
                 ' overflow-x: auto; font-family: monospace;">'
-                '<code>' + html.escape(_current_svg) + '</code></pre>'
+                '<code>' + html.escape(_current.svg) + '</code></pre>'
             )
         else:
             # SVG diagram — render raw
             artifact_block = (
                 '<div style="margin-bottom: 12px; text-align: center;">'
-                + _current_svg
+                + _current.svg
                 + '</div>'
             )
     return f"""
@@ -1337,11 +1474,11 @@ def _feedback_buttons_html(card_id: int, variant_id: int) -> str:
 def _prefilled_expected_answer_html() -> str:
     """Return the expected-answer div, pre-filled from cache but hidden until grading fires."""
     content = ""
-    if _current_expected_answer:
+    if _current.expected_answer:
         content = (
             "<div style='margin-bottom: 4px; color: #666; font-size: 0.84em;'>"
             "<b>AI answer target</b></div>"
-            "<div>" + html.escape(_current_expected_answer) + "</div>"
+            "<div>" + html.escape(_current.expected_answer) + "</div>"
         )
     return (
         '<div id="variant-expected-answer" style="display: none;'
@@ -1427,8 +1564,17 @@ def _freeform_input_html() -> str:
 # Text extraction
 # ---------------------------------------------------------------------------
 
+_MAX_EXTRACTED_CARD_CHARS = 2000
+
+
 def _extract_text(card, side: str) -> str:
-    """Extract plain text from a card's question or answer side."""
+    """Extract plain text from a card's question or answer side.
+
+    Caps length at _MAX_EXTRACTED_CARD_CHARS so a pathological card (e.g., a
+    long cloze with embedded prose) cannot blow through the model's token
+    budget or widen the prompt-injection surface. The generator layer also
+    sanitises input, but capping here keeps token usage bounded.
+    """
     if side == "question":
         text = card.question()
     else:
@@ -1438,6 +1584,8 @@ def _extract_text(card, side: str) -> str:
     text = re.sub(r'<(style|script)[^>]*>.*?</\1>', ' ', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
+    if len(text) > _MAX_EXTRACTED_CARD_CHARS:
+        text = text[:_MAX_EXTRACTED_CARD_CHARS].rstrip() + ' [...truncated]'
     return text
 
 
@@ -1603,9 +1751,9 @@ def _save_current_idea(card_id=None, variant_id=None):
         if not _cache:
             return
 
-        target_card_id = card_id if card_id is not None else _current_card_id
-        target_variant_id = variant_id if variant_id is not None else _current_variant_id
-        variant_text = _current_variant
+        target_card_id = card_id if card_id is not None else _current.card_id
+        target_variant_id = variant_id if variant_id is not None else _current.variant_id
+        variant_text = _current.variant
         rating = None
 
         if target_variant_id is not None:
@@ -1626,7 +1774,7 @@ def _save_current_idea(card_id=None, variant_id=None):
         orig_a = _extract_text(card, "answer")
 
         evaluation = None
-        if _current_card_id == target_card_id:
+        if _current.card_id == target_card_id:
             evaluation = _evaluation_text
 
         _cache.save_idea(
@@ -2074,8 +2222,8 @@ def show_card_ideas_dialog():
 def _quick_save_variant_card():
     """Directly save a new card with variant question as front, AI answer as back."""
     try:
-        front = _current_variant or ""
-        back = _current_expected_answer or ""
+        front = _current.variant or ""
+        back = _current.expected_answer or ""
         if not front:
             tooltip("Proteus: no active variant")
             return
@@ -2103,8 +2251,8 @@ def _open_add_note_from_variant():
     try:
         from aqt.addcards import AddCards
 
-        front = _current_variant or ""
-        back = _current_expected_answer or ""
+        front = _current.variant or ""
+        back = _current.expected_answer or ""
         if not front:
             tooltip("Proteus: no active variant")
             return
@@ -2212,7 +2360,8 @@ def show_variant_style_dialog():
     from .generator import VARIANT_STYLES
 
     style_labels = {
-        "wozniak_matuschak": "Wozniak + Matuschak — minimum info, retrieval-focused, unambiguous",
+        "wozniak": "Wozniak — minimum info, retrieval-focused, unambiguous",
+        "matuschak_contextualized": "Matuschak — scenario-based contextualized recall",
         "bloom": "Bloom's Taxonomy — cognitive level scales with card maturity",
         "elaborative": "Elaborative — why/how questions, causal reasoning",
         "feynman": "Feynman — explain simply, clarity over precision",
@@ -2238,13 +2387,13 @@ def show_variant_style_dialog():
         "Each card randomly gets one of the selected styles.</span>"
     ))
 
-    current = CONFIG.get("variant_style", ["wozniak_matuschak"])
+    current = CONFIG.get("variant_style", ["wozniak"])
     if isinstance(current, str):
         current = [current]
     current_set = set(current)
 
     style_groups = [
-        ("Core", ["wozniak_matuschak", "bloom", "elaborative", "feynman", "cloze_generation"]),
+        ("Core", ["wozniak", "matuschak_contextualized", "bloom", "elaborative", "feynman", "cloze_generation"]),
         ("Contrast & Context", ["discrimination", "real_world"]),
         ("Transfer", ["transfer_code", "transfer_stats", "transfer_math"]),
         ("Visual", ["diagram_labeling"]),

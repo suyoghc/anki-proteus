@@ -38,11 +38,31 @@ if "aqt" not in sys.modules:
     _qt.QAction = type("QAction", (), {"__init__": lambda *a, **kw: None})
     _qt.QMenu = type("QMenu", (), {"__init__": lambda *a, **kw: None})
     _qt.QThread = type("QThread", (), {"__init__": lambda *a, **kw: None})
-    _qt.pyqtSignal = lambda *a, **kw: lambda *a2, **kw2: None
-    _qt.QObject = type("QObject", (), {})
-    _qt.QTimer = type("QTimer", (), {
-        "singleShot": staticmethod(lambda *a, **kw: None),
-    })
+    _qt.QObject = type("QObject", (), {"__init__": lambda *a, **kw: None})
+
+    # pyqtSignal: real Qt returns a descriptor that binds per-instance; for
+    # tests we return a lightweight stand-in with .emit() and .connect()
+    # methods. Tests that need to assert emission should replace the
+    # instance-level attribute with a mock (see TestPrefetchWorker).
+    class _FakeSignal:  # noqa: D401
+        def __init__(self, *types_): pass
+        def emit(self, *a, **kw): pass
+        def connect(self, *a, **kw): pass
+        def disconnect(self, *a, **kw): pass
+    _qt.pyqtSignal = lambda *a, **kw: _FakeSignal()
+
+    class _FakeTimer:
+        """Minimal QTimer stub for outside-Anki tests. No actual firing."""
+        def __init__(self, *a, **kw):
+            self.timeout = _FakeSignal()
+            self._interval = 0
+            self._active = False
+        def start(self, interval=0): self._interval = interval; self._active = True
+        def stop(self): self._active = False
+        def isActive(self): return self._active
+        @staticmethod
+        def singleShot(*a, **kw): pass
+    _qt.QTimer = _FakeTimer
 
     _webview = types.ModuleType("aqt.webview")
     _webview.AnkiWebView = type("AnkiWebView", (), {})
@@ -87,3 +107,21 @@ if _PKG not in sys.modules:
     _pkg_mod.__package__ = _PKG
     sys.modules[_PKG] = _pkg_mod
     _pkg_spec.loader.exec_module(_pkg_mod)
+
+# ---------------------------------------------------------------------------
+# 3. Autouse fixture: clear the API error reporter between tests so a test
+#    that registers one cannot leak its hook into a later test. Individual
+#    tests may still register/clear explicitly for readability; this is the
+#    safety net.
+# ---------------------------------------------------------------------------
+import pytest  # noqa: E402  (after sys.path/module stubs)
+
+
+@pytest.fixture(autouse=True)
+def _reset_api_error_reporter():
+    import generator  # registered as a top-level alias above
+    generator.register_error_reporter(None)
+    try:
+        yield
+    finally:
+        generator.register_error_reporter(None)

@@ -10,3 +10,12 @@ CLAUDE.md
 AGENTS.md
 Learnables/
 new ideas/
+
+# Obsidian vault — personal workspace state
+.obsidian/
+.trash/
+
+# Private research vault for this project. Holds primary sources,
+# clippings, and synthesis notes that ground the README citations.
+# Public decision log lives in Notes/DECISIONS.md instead.
+anki-proteus-knowledge/
