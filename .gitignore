@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 variant_cache.db
+variant_cache.db-*
 meta.json
 proteus_diag.log
 usage.json
@@ -17,5 +18,8 @@ new ideas/
 
 # Private research vault for this project. Holds primary sources,
 # clippings, and synthesis notes that ground the README citations.
-# Public decision log lives in Notes/DECISIONS.md instead.
 anki-proteus-knowledge/
+
+# Decision log — kept private. Used for personal context when working
+# on the repo, but not shipped publicly.
+Notes/DECISIONS.md
