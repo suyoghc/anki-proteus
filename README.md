@@ -1,34 +1,59 @@
 # Anki Proteus
 
 An Anki add-on that rewrites each review question on the fly using an LLM, so
-you retrieve the concept rather than recognise the card.
+you retrieve the concept rather than merely practice recognizing the card.
 
-## Why
+## Why?
 
-Andy Matuschak lists *pattern matching* among the first failure modes of spaced
-repetition prompts: "unusually worded questions risk memorising shape rather
-than content" [[Matuschak 2020](#references)]. The failure is hard to notice in
-practice. The card is answered correctly, the scheduler extends the interval,
-and nothing flags that the learner recognised the wording instead of retrieving
-the knowledge.
+Spaced repetition cards have a well-known, and honestly quite frustrating,
+failure mode. After a bit of practice, a card can get memorized and retrieved
+as a surface pattern between the wording of the prompt and the shape of the
+answer, rather than as the concept it was meant to rehearse
+[[Matuschak 2020](#references)]. You may answer the card correctly, the
+scheduler extends the interval, but nothing flags that you happened to
+participate in pattern recognition rather than knowledge retrieval.
 
-Anki Proteus inserts a rephrasing step between the scheduler and the display.
-At review time, the original question is transformed into a variant that tests
-the same underlying concept in different wording, a different scenario, or a
-different cognitive register. You still grade against the canonical answer on
-the card; only the question surface changes.
+Enter ***Anki Proteus***! It inserts a rephrasing step between the scheduler
+and the display, so that at review time, the original question is reframed
+into a variant that tests the same underlying concept in either different
+wording, a different scenario, or a different type of recall task.
 
-The FSRS/SM-2 scheduler is untouched, the variant is ephemeral, and only the
-original card is scored.
+Which of those you get on a given review is itself randomly sampled from the
+styles you've enabled, so the *kind* of question shifts unpredictably from one
+visit to the next. This is another layer of surprisal, aimed at preventing
+surface-level encoding at the style level as well.
+
+The idea behind Proteus is that, at minimum, it forces you to parse the entire
+question. Then you can proceed as usual and compare your retrieved answer with
+the new answer to the reframed question.
+
+Or, even better, there is a freeform response mode. You can think out loud,
+using tools like [Wispr Flow](https://wisprflow.ai/) or
+[Superwhisper](https://superwhisper.com/) to enter an answer to the variant
+question, and you will receive an AI-generated score and feedback as an
+additional signal for your self-grade.
+
+There's also a personal learning context you can fill in: who you are, what
+you're currently working on, what matters to you right now. Variants can be
+framed against it. This is optional, of course! And changeable across sessions.
+The idea is that personal relevance is one of the stronger drivers of encoding
+and recall, and this allows for that. It can also help with goal-directed
+learning and reframing in a given session.
+
+The FSRS/SM-2 scheduler remains untouched. Only the original card is scheduled;
+variants are cached for reuse and never become their own scheduled cards. Save
+a favourite to promote it into a real card.
 
 ## How it works
 
 When a card comes up for review, the add-on:
 
-1. Sends the original question + answer to the Anthropic API.
+1. Sends the original question + answer to an LLM (e.g. via Anthropic API).
 2. Receives a variant question that targets the same concept.
 3. Displays the variant in place of the original question.
-4. On flip, shows the original answer. You grade normally.
+4. On flip, shows the AI-generated answer (in addition to the canonical card,
+   if you wish). You reschedule the concept based on the quality of your
+   retrieval.
 
 Cards are pre-generated in the background, so the review UI is never blocked
 waiting on the API. Variants are cached per card, so repeat reviews draw from
@@ -36,14 +61,22 @@ a pool rather than re-generating on every show.
 
 ## Two review modes
 
-**Flip mode (default)** — the standard Anki flow with a transformed question.
-Fast, with no extra friction.
+**Freeform mode (default)** — after the variant question, a text area appears.
+Dictate or type your answer (for example, via
+[Wispr Flow](https://wisprflow.ai/) or [Superwhisper](https://superwhisper.com/)),
+submit, and the grading feedback fills in. The expected answer is pre-fetched
+alongside the variant, so it appears instantly; the grading call runs in
+parallel. Flip to see the canonical answer and the feedback panel.
 
-**Freeform mode** — after the variant question, a text area appears. Dictate or
-type your answer (for example, via [Wispr Flow](https://www.wispr.flow/)),
-submit, and the grading feedback fills in. The expected answer is
-pre-fetched alongside the variant, so it appears instantly; the grading call
-runs in parallel. Flip to see the canonical answer and the feedback panel.
+![Freeform review mode](docs/img/freeform-mode.png)
+
+After submitting, the grading panel appears inline with the expected answer
+and a short critique of your response.
+
+![Inline grading feedback](docs/img/feedback.png)
+
+**Flip mode** — the standard Anki flow with a transformed question. Fast, with
+no extra friction.
 
 Toggle modes with **Ctrl+Shift+V** (Cmd+Shift+V on macOS) or in the config.
 
@@ -53,74 +86,29 @@ Each eligible review picks a style at random from the configured set. Styles
 are selected via **Tools → Proteus → Variant Styles…** and listed in
 `config.json` under `variant_style`.
 
-Each style's citation below marks the intellectual lineage it draws from,
-not the exact source of the prompt text. See
-[Sources & honesty](#sources--honesty) for which sources were read
-first-hand versus invoked as canonical references.
+Each style's citation marks the intellectual lineage it draws from.
 
-### Core
+| Style                        | Best for                  | What it does                                                               | Grounding                |
+| ---------------------------- | ------------------------- | -------------------------------------------------------------------------- | ------------------------ |
+| **Wozniak**                  | Clean recall              | One concept, unambiguous wording, retrieval-focused.                       | [1]                      |
+| **Matuschak Contextualized** | Understanding             | Embeds the concept in a 2-3 sentence scenario the learner reasons through. | [2]                      |
+| **Bloom's Taxonomy**         | Maturing cards            | Cognitive level scales with card maturity (interval).                      | [3]                      |
+| **Elaborative**              | Causal reasoning          | "Why" or "how" questions forcing explanation.                              | [4]                      |
+| **Feynman**                  | Plain-language clarity    | "Explain simply" framing. Clarity over precision.                          | [5], [6]                 |
+| **Cloze Generation**         | Key term recall           | Fill-in-the-blank producing the key term.                                  | [7], [8]                 |
+| **Discrimination**           | Confusable concepts       | "How does X differ from Y?" with genuinely confusable ideas.                | [9], [10]                |
+| **Real-World Examples**      | Transfer                  | Identify the concept from a real, named case.                              | Author's own framing.    |
+| **Transfer: Code**           | Programming               | Debug, predict, or identify the technique in a code snippet.               | [11]                     |
+| **Transfer: Stats**          | Statistics                | Interpret model output or diagnose assumptions.                            | [11]                     |
+| **Transfer: Math**           | Math                      | Find the error or identify the technique in an equation.                   | [11]                     |
+| **Diagram Labeling**         | Visual memory             | SVG diagram with labeled blanks (A, B, C) to identify.                     | [12]                     |
 
-| Style                        | What it does                                                              | Grounding                 |
-|------------------------------|---------------------------------------------------------------------------|---------------------------|
-| **Wozniak**                  | One concept, unambiguous wording, retrieval-focused.                      | [1]                       |
-| **Matuschak Contextualized** | Embeds the concept in a 2–3 sentence scenario the learner reasons through. | [2]                       |
-| **Bloom's Taxonomy**         | Cognitive level scales with card maturity (interval).                     | [3] (with caveat, below)  |
-| **Elaborative**              | "Why" or "how" questions forcing causal reasoning.                        | [4]                       |
-| **Feynman**                  | "Explain simply" framing. Clarity over precision.                         | [5], [6]                  |
-| **Cloze Generation**         | Fill-in-the-blank producing the key term.                                 | [7], [8]                  |
+A good starting set is `wozniak`, `matuschak_contextualized`, `elaborative`,
+`discrimination`, and `feynman`. Add transfer or diagram styles when they fit
+your material. For exact length limits, Bloom's interval mapping, fallback
+behavior, and source caveats, see [`docs/variant-styles.md`](docs/variant-styles.md).
 
-> **Bloom caveat.** The mapping from card interval to cognitive level is a
-> heuristic, not something Anderson & Krathwohl propose. The canonical source
-> grounds the taxonomy itself, not its use as a scheduler-linked difficulty dial.
-
-> **Upgrading from earlier versions.** The old fused `wozniak_matuschak` style
-> was split into two separate styles (`wozniak` and `matuschak_contextualized`)
-> in April 2026. Existing configs are migrated automatically: if your
-> `variant_style` contained `wozniak_matuschak`, both new styles are added in
-> its place to preserve the prior sampling behaviour.
-
-### Contrast & context
-
-| Style                  | What it does                                                 | Grounding                          |
-|------------------------|--------------------------------------------------------------|------------------------------------|
-| **Discrimination**     | "How does X differ from Y?" with genuinely confusable concepts. | [9], [10]                       |
-| **Real-World Examples** | Identify the concept from a real, named case.               | Author's own framing (see below).  |
-
-> **Real-World honesty.** The `real_world` style was designed on intuition, not
-> from a specific source. Related literature on concrete examples exists
-> (for example, Rawson, Thomas & Jacoby 2015), but was not a direct input.
-
-### Transfer
-
-| Style              | What it does                                                | Grounding |
-|--------------------|-------------------------------------------------------------|-----------|
-| **Transfer: Code**  | Debug, predict, or identify the technique in a code snippet. | [11]      |
-| **Transfer: Stats** | Interpret model output or diagnose assumptions.              | [11]      |
-| **Transfer: Math**  | Find the error or identify the technique in an equation.     | [11]      |
-
-### Visual
-
-| Style                | What it does                                           | Grounding |
-|----------------------|--------------------------------------------------------|-----------|
-| **Diagram Labeling** | SVG diagram with labeled blanks (A, B, C) to identify. | [12]      |
-
-### Per-style length limits
-
-| Style                                           | Max words | Max chars |
-|-------------------------------------------------|-----------|-----------|
-| Wozniak                                         | 26        | 180       |
-| Bloom, Elaborative, Discrimination, Cloze, Transfer | 30    | 210       |
-| Real-World                                      | 35        | 250       |
-| Feynman, Matuschak Contextualized               | 50        | 350       |
-
-### Bloom's maturity mapping
-
-| Card interval | Cognitive level          |
-|---------------|--------------------------|
-| ≤ 7 days      | Remember / Understand    |
-| ≤ 30 days     | Understand / Apply       |
-| ≤ 90 days     | Apply / Analyze          |
-| > 90 days     | Analyze / Evaluate       |
+![Variant Styles dialog](docs/img/variant-styles-dialog.png)
 
 ## Features
 
@@ -151,50 +139,38 @@ first-hand versus invoked as canonical references.
 
 ## Behaviour
 
-### Which cards become variants
+Two stages: an **eligibility filter** (deterministic, card-level) and a
+**random roll** (per review).
 
-A card is eligible only if all of the following pass:
+**Eligibility filter.** A card is only ever considered for a variant if all of
+these pass:
 
-- `enabled` is `true`
-- `api_key` is set
-- the note type is not in `exclude_note_types`
-- the extracted question text is at least 10 characters
-- the deck matches `active_decks` (when configured)
-- the interval meets `min_interval_days`
-- the random roll passes `transform_percent`
+- `enabled` is `true` and `api_key` is set.
+- The note type is not in `exclude_note_types` (Image Occlusion is excluded
+  by default, since there's no textual question to rephrase).
+- The extracted question text is at least 10 characters. This skips
+  image-only or media-only cards — if there aren't enough words to work with,
+  the LLM has nothing to rephrase, so the original is shown as-is.
+- The deck matches `active_decks` when that filter is configured (empty means
+  all decks).
+- The card's interval meets `min_interval_days`. Useful if you only want
+  variants on mature cards (e.g., set to 7 or 14 so young cards stabilise on
+  the original wording first).
+
+**Random roll.** Among eligible cards, `transform_percent` decides how often
+a variant actually shows. Default is **80**: ~80% of eligible reviews get a
+variant, ~20% fall through to the original question. You can tune this from
+the Variant Styles dialog based on how much novelty you're in the mood for —
+lower it on days you want a gentler session, raise it to 100 for maximum
+rephrasing. The skipped reviews are themselves a source of surprisal: not
+knowing whether the next card will be rephrased keeps you from settling into
+a fixed parsing stance.
 
 Review-time replacement uses cached variants only. The UI is never blocked on
 a synchronous API call.
 
-### Feedback modes
-
-`feedback_mode` controls which evaluation perspectives the grader returns:
-
-- `"ai"`: question page only; response compared against the AI expected answer.
-- `"canonical"`: answer page only; response compared against the canonical
-  flashcard answer.
-- `"both"`: both perspectives; one API call returns both.
-
-### Grading semantics
-
-- The coverage donut uses grayscale (dark = covered, light = uncovered).
-- A misaligned variant returns: `Question drifted from canonical target.`
-- The AI coverage donut on the question side is controlled by
-  `show_ai_coverage` (default off).
-
-### Variant generation constraints
-
-- All styles enforce short, direct sentences (max 12 words per sentence).
-- No preamble, no subordinate clauses, no filler words.
-- Visual styles (diagram, transfer) can opt out when the concept isn't suited,
-  falling back to text.
-
-### Card-creation buttons
-
-- 🔖 save as a card idea (review later in the Card Ideas dialog).
-- ➕ blank Add Note.
-- 💾 quick save of variant Q + AI expected answer as a new card.
-- 📋 pre-filled Add Note for editing before save.
+For grading perspectives, coverage output, and the exact feedback schema, see
+[`docs/grading.md`](docs/grading.md).
 
 ## Compatibility
 
@@ -209,8 +185,7 @@ context strings `reviewQuestion` and `reviewAnswer`.
      `~/Library/Application Support/Anki2/addons21/` (macOS),
      `%APPDATA%\Anki2\addons21\` (Windows).
 
-2. Copy the `anki_proteus` folder into the add-ons folder (or symlink it for
-   development).
+2. Copy or symlink this repository into the add-ons folder as `anki_proteus`.
 
 3. Restart Anki.
 
@@ -228,41 +203,17 @@ context strings `reviewQuestion` and `reviewAnswer`.
 
 ## Configuration
 
-Edit via **Tools → Add-ons → Config** or directly in `config.json`:
-
-```json
-{
-    "enabled": true,
-    "api_key": "",
-    "model": "claude-sonnet-4-20250514",
-    "response_mode": "flip",
-    "active_decks": [],
-    "transform_percent": 80,
-    "min_interval_days": 0,
-    "max_cached_variants": 3,
-    "system_prompt": "",
-    "learner_context": "",
-    "exclude_note_types": ["Image Occlusion"],
-    "variant_style": ["wozniak"],
-    "batch_prefetch_count": 15,
-    "batch_prefetch_concurrency": 3,
-    "show_prefetch_progress": true,
-    "debug_logging": false,
-    "usage_budget": 5.00,
-    "grading_model": "",
-    "grading_max_tokens": 280,
-    "grading_timeout_s": 10,
-    "feedback_mode": "both",
-    "show_ai_coverage": false
-}
-```
-
-### Key settings
+Edit via **Tools → Add-ons → Config** or directly in `config.json`. The
+defaults live in [`config.json`](config.json); the settings most worth knowing
+about are:
 
 **`variant_style`**: list of styles to sample from. Each card picks one at
 random. Valid values: `wozniak`, `matuschak_contextualized`, `bloom`,
 `elaborative`, `feynman`, `cloze_generation`, `discrimination`, `real_world`,
 `transfer_code`, `transfer_stats`, `transfer_math`, `diagram_labeling`.
+
+**`response_mode`**: `"freeform"` by default, or `"flip"` for the standard Anki
+flow with transformed questions only.
 
 **`learner_context`**: personal context injected into every variant prompt.
 Describe yourself and what's currently relevant. Set via the Variant Styles
@@ -278,7 +229,8 @@ Default `false`.
 Empty means all decks.
 
 **`transform_percent`**: below 100, some reviews show the original question.
-80 means roughly 1 in 5 reviews is unmodified.
+80 means roughly 1 in 5 reviews is unmodified. Settable from the Variant
+Styles dialog as well.
 
 **`min_interval_days`**: only transform cards above this interval. Set to 7
 or 14 to restrict to mature cards.
@@ -289,20 +241,12 @@ or 14 to restrict to mature cards.
 
 **`grading_max_tokens`**: max output tokens for grading. Default 280.
 
+**`submit_delay_ms`**: short delay before submitting a freeform answer, useful
+when dictation tools are still finalizing text.
+
 **`debug_logging`**: write diagnostic logs to `proteus_diag.log`.
 
-## Coverage & gaps output schema
-
-**Canonical perspective** (answer page):
-- `alignment`: `aligned | partial | misaligned`
-- `canonical_points`, `covered_points`, `missed_points`, `coverage_pct`
-
-**AI answer perspective** (question page, `"ai"` or `"both"` mode):
-- `expected_answer`, `ai_covered_points`, `ai_missed_points`, `ai_coverage_pct`
-
-**Shared**: `learning_feedback`, `incorrect`, `overall`.
-
-## Cost
+## Cost (assuming Claude Sonnet API calls)
 
 - **Flip mode.** Roughly one API call per transformed review; caching reduces
   this.
@@ -314,7 +258,7 @@ or 14 to restrict to mature cards.
 - At 50 reviews per day: roughly \$0.12–0.25/day in flip mode, \$0.30–0.50/day
   in freeform mode.
 
-## Keyboard shortcuts
+## Keyboard shortcuts and menu
 
 - **Ctrl+Shift+P**: toggle Proteus on/off (Cmd+Shift+P on macOS).
 - **Ctrl+Shift+V**: toggle flip/freeform mode (Cmd+Shift+V on macOS).
@@ -322,35 +266,15 @@ or 14 to restrict to mature cards.
   (Cmd+Shift+Left on macOS).
 - **Enter** or the submit button (freeform): submit the response and start
   grading.
+- The **Tools → Proteus** menu also exposes Card Ideas, Usage Stats, Variant
+  Styles, Refresh Variant Cache, and the same session toggles.
 
-## Tools menu
+## Documentation
 
-```
-Tools → Proteus →
-    Card Ideas
-    Usage Stats
-    Variant Styles...
-    Refresh Variant Cache
-    ─────────────
-    Toggle On/Off         Ctrl+Shift+P
-    Toggle Flip/Freeform  Ctrl+Shift+V
-    Back to Question      Ctrl+Shift+Left
-```
-
-## Files
-
-```
-anki_proteus/
-├── __init__.py         Hooks, UI injection, review flow.
-├── generator.py        LLM API calls, variant styles, grading.
-├── cache.py            SQLite cache (schema v9) for variants + card ideas.
-├── prefetch.py         Single-card background prefetch thread.
-├── batch_prefetch.py   Parallel batch pre-generation at session start.
-├── config.json         Default configuration.
-├── manifest.json       Anki add-on metadata.
-├── tests/test_core.py  Unit tests.
-└── README.md
-```
+- [`docs/variant-styles.md`](docs/variant-styles.md): exact style behavior,
+  length limits, Bloom maturity mapping, fallbacks, and source caveats.
+- [`docs/grading.md`](docs/grading.md): feedback modes, coverage output schema,
+  grading semantics, and dictation timing.
 
 ## Development
 
@@ -366,10 +290,14 @@ Changes take effect on Anki restart. Run tests:
 pytest -v
 ```
 
-Design decisions are logged in `Notes/DECISIONS.md`.
+## License
+
+Anki Proteus is licensed under the GNU Affero General Public License v3.0 or
+later. See `LICENSE`.
 
 ## Future directions
 
+- **Port this to Obsidian**
 - **Web search for discrimination**: fetch commonly confused concepts to
   build better contrasts.
 - **Chrome extension**: generate cards from web page content using the same
@@ -378,20 +306,6 @@ Design decisions are logged in `Notes/DECISIONS.md`.
   interpretation.
 - **Keyword similarity**: client-side sanity check on LLM coverage verdicts.
 - **Pretesting**: show variants before first review (productive failure).
-
-## Sources & honesty
-
-Citations below are the intellectual grounding for each variant style.
-Honesty note: of the twelve sources, only Matuschak (2020) was read in full
-before the prompts were written. The others are canonical references for
-well-known effects (generation, desirable difficulties, transfer-appropriate
-processing, dual coding) that inform the design in spirit. A private reading
-trail is maintained outside this repository and the prompts will be revised
-as each source is extracted; see `Notes/DECISIONS.md` (D2) for the rework
-of `matuschak_contextualized` against Matuschak's five principles.
-
-The `real_world` style is flagged as author's own framing, not derived from
-a source.
 
 ## References
 
