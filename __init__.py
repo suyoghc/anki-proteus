@@ -233,9 +233,15 @@ def init_addon():
     # Route API failures from generator._call_api through our UI reporter.
     register_error_reporter(_on_api_error)
 
-    if not CONFIG.get("api_key"):
-        showInfo("Proteus: No API key configured.\n\n"
-                 "Set it in: Tools → Add-ons → select Proteus → Config")
+    # Nudge once per startup if no API key is set. The _initialized guard in
+    # _try_init prevents this from firing twice during a single profile load.
+    if CONFIG.get("enabled", True) and not CONFIG.get("api_key", "").strip():
+        showInfo(
+            "Anki Proteus is installed but no Anthropic API key is set.\n\n"
+            "Set your key under Tools → Add-ons → Anki Proteus → Config "
+            "to start generating variant questions.\n\n"
+            "Without a key, Proteus won't transform any reviews."
+        )
 
     # Warn once at profile load if the configured model is known-retired.
     # The API would return a 404 on first use anyway, but the message is
@@ -2660,10 +2666,16 @@ def _try_init():
     global _initialized
     if _initialized:
         return
+    # Set the flag *before* init_addon runs. init_addon may open a modal
+    # (e.g., the first-run API-key warning), and Qt runs a nested event loop
+    # during a modal — without this guard, a re-entrant profile_did_open or
+    # the delayed QTimer below would call init_addon a second time and fire
+    # the modal again.
+    _initialized = True
     try:
         init_addon()
-        _initialized = True
     except Exception as e:
+        _initialized = False  # allow retry on next profile open
         showInfo(f"Proteus: init failed: {e}")
 
 def _try_cleanup():
