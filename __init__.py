@@ -80,7 +80,7 @@ def load_config():
         "enabled": True,                  # master on/off toggle for Proteus variants
         "api_key": "",
         "model": DEFAULT_MODEL,
-        "response_mode": "flip",          # "flip" or "freeform"
+        "response_mode": "freeform",      # "flip" or "freeform"
         "active_decks": [],                # empty = all decks
         "transform_percent": 80,           # % of eligible cards to transform
         "min_interval_days": 0,            # only transform cards above this interval
@@ -233,9 +233,15 @@ def init_addon():
     # Route API failures from generator._call_api through our UI reporter.
     register_error_reporter(_on_api_error)
 
-    if not CONFIG.get("api_key"):
-        showInfo("Proteus: No API key configured.\n\n"
-                 "Set it in: Tools → Add-ons → select Proteus → Config")
+    # Nudge once per startup if no API key is set. The _initialized guard in
+    # _try_init prevents this from firing twice during a single profile load.
+    if CONFIG.get("enabled", True) and not CONFIG.get("api_key", "").strip():
+        showInfo(
+            "Anki Proteus is installed but no Anthropic API key is set.\n\n"
+            "Set your key under Tools → Add-ons → Anki Proteus → Config "
+            "to start generating variant questions.\n\n"
+            "Without a key, Proteus won't transform any reviews."
+        )
 
     # Warn once at profile load if the configured model is known-retired.
     # The API would return a 404 on first use anyway, but the message is
@@ -302,6 +308,8 @@ def toggle_response_mode():
             escaped_html = _freeform_input_html().replace("\\", "\\\\").replace("`", "\\`")
             mw.reviewer.web.eval(f"""
             (function() {{
+                var hint = document.getElementById('variant-freeform-toggle-hint');
+                if (hint) hint.remove();
                 var q = document.getElementById('variant-question');
                 if (q && !document.getElementById('variant-response-area')) {{
                     q.insertAdjacentHTML('afterend', `{escaped_html}`);
@@ -313,14 +321,20 @@ def toggle_response_mode():
     else:
         CONFIG["response_mode"] = "flip"
         tooltip("Proteus: flip mode (standard review)")
-        # Remove freeform input via JS
+        # Remove freeform input via JS, but leave the shortcut hint visible.
         if mw.reviewer and mw.reviewer.web:
+            escaped_hint = _freeform_toggle_hint_html().replace("\\", "\\\\").replace("`", "\\`")
             mw.reviewer.web.eval("""
             (function() {
                 var el = document.getElementById('variant-response-area');
                 if (el) el.remove();
+                if (!document.getElementById('variant-freeform-toggle-hint')) {
+                    var target = document.querySelector('.variant-feedback') ||
+                        document.getElementById('variant-question');
+                    if (target) target.insertAdjacentHTML('afterend', `%s`);
+                }
             })();
-            """)
+            """ % escaped_hint)
 
 
 def toggle_proteus_enabled():
@@ -435,6 +449,8 @@ def on_card_will_show(text: str, card, kind: str) -> str:
                 styled_variant += _feedback_buttons_html(card.id, _current.variant_id)
                 if CONFIG.get("response_mode") == "freeform":
                     styled_variant += _freeform_input_html()
+                else:
+                    styled_variant += _freeform_toggle_hint_html()
                 return styled_variant
 
             _returning_to_question = False
@@ -454,6 +470,8 @@ def on_card_will_show(text: str, card, kind: str) -> str:
                 styled_variant += _feedback_buttons_html(card.id, _current.variant_id)
                 if CONFIG.get("response_mode") == "freeform":
                     styled_variant += _freeform_input_html()
+                else:
+                    styled_variant += _freeform_toggle_hint_html()
                 return styled_variant
 
             return text
@@ -1347,11 +1365,38 @@ def _cancel_batch_prefetch():
 # HTML helpers
 # ---------------------------------------------------------------------------
 
+_VARIANT_STYLE_DISPLAY_NAMES = {
+    "wozniak": "Wozniak",
+    "matuschak_contextualized": "Matuschak Contextualized",
+    "bloom": "Bloom's Taxonomy",
+    "elaborative": "Elaborative",
+    "feynman": "Feynman",
+    "real_world": "Real-World Examples",
+    "transfer_code": "Transfer: Code",
+    "transfer_stats": "Transfer: Stats",
+    "transfer_math": "Transfer: Math",
+    "discrimination": "Discrimination",
+    "cloze_generation": "Cloze Generation",
+    "diagram_labeling": "Diagram Labeling",
+}
+
+
+def _variant_style_display_name(style_key: str) -> str:
+    """Human-readable label for the variant style shown in review UI."""
+    if not style_key:
+        return ""
+    return _VARIANT_STYLE_DISPLAY_NAMES.get(
+        style_key,
+        style_key.replace("_", " ").title(),
+    )
+
 
 def _wrap_variant_html(variant: str) -> str:
     """Wrap variant question in styled HTML. Renders SVG or code artifacts if present."""
     from .generator import VARIANT_STYLES
     safe_variant = html.escape(variant)
+    style_name = _variant_style_display_name(_current.variant_style)
+    style_suffix = f" ({html.escape(style_name)})" if style_name else ""
     artifact_block = ""
     if _current.svg:
         style = VARIANT_STYLES.get(_current.variant_style, {})
@@ -1381,7 +1426,7 @@ def _wrap_variant_html(variant: str) -> str:
             color: #888;
             margin-bottom: 8px;
             font-style: italic;
-        ">&#128256; variant question</div>
+        ">&#128256; variant question{style_suffix}</div>
         {artifact_block}
         <div>{safe_variant}</div>
     </div>
@@ -1489,20 +1534,33 @@ def _prefilled_expected_answer_html() -> str:
     )
 
 
+def _freeform_toggle_hint_html() -> str:
+    """Small persistent reminder for re-enabling freeform response mode."""
+    return (
+        '<div id="variant-freeform-toggle-hint" style="'
+        'padding: 4px 12px 10px 12px; font-size: 0.78em; color: #888;'
+        'font-style: italic;">'
+        'Cmd+Shift+V toggles freeform response'
+        '</div>'
+    )
+
+
 def _freeform_input_html() -> str:
     """HTML for the freeform text response area with inline grading placeholders."""
     return (
         '<div id="variant-response-area" style="'
         'margin-top: 20px; padding: 12px; border-top: 1px solid #ddd;">'
         '<div style="font-size: 0.85em; color: #666; margin-bottom: 6px;">'
-        'Speak or type your response:</div>'
+        'Speak or type your response: '
+        '<span style="font-size: 0.9em; color: #888; font-style: italic;">'
+        '(Cmd+Shift+V toggles freeform response)</span></div>'
         '<div style="position: relative;">'
         '<textarea id="variant-response-input" rows="4" style="'
         'width: 100%; box-sizing: border-box; font-size: 1em; padding: 8px;'
         ' padding-right: 44px;'
         ' border: 1px solid #ccc; border-radius: 4px; resize: vertical;'
         ' font-family: inherit;"'
-        ' placeholder="Click here, then use Wispr Flow or type..."'
+        ' placeholder="Click here. Then dictate using Superwhisper/Wispr Flow OR just type away..."'
         """ oninput="pycmd('variantResponse:' + this.value)" """
         ' onkeydown="'
         """if (event.key === 'Enter' && !event.shiftKey) {"""
@@ -2356,7 +2414,7 @@ def _budget_bar_text(pct: int) -> str:
 
 def show_variant_style_dialog():
     """Show a dialog with checkboxes to pick active variant styles."""
-    from aqt.qt import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QPlainTextEdit
+    from aqt.qt import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox, QPlainTextEdit, QSpinBox
     from .generator import VARIANT_STYLES
 
     style_labels = {
@@ -2416,6 +2474,33 @@ def show_variant_style_dialog():
             checkboxes[key] = cb
             layout.addWidget(cb)
 
+    # Variant frequency section
+    sep = QFrame()
+    sep.setFrameShape(QFrame.Shape.HLine)
+    sep.setStyleSheet("color: #ddd;")
+    layout.addWidget(sep)
+    layout.addWidget(QLabel(
+        "<span style='color: #888; font-size: 0.85em;'>Variant Frequency</span>"
+    ))
+    layout.addWidget(QLabel(
+        "<span style='color: #666; font-size: 0.85em;'>"
+        "Share of eligible reviews that get a variant. Values below 100% "
+        "leave some reviews on the original question, which can itself be a "
+        "source of surprisal.</span>"
+    ))
+    freq_row = QHBoxLayout()
+    freq_spin = QSpinBox()
+    freq_spin.setRange(0, 100)
+    freq_spin.setSingleStep(5)
+    freq_spin.setSuffix("%")
+    try:
+        freq_spin.setValue(int(CONFIG.get("transform_percent", 80)))
+    except (TypeError, ValueError):
+        freq_spin.setValue(80)
+    freq_row.addWidget(freq_spin)
+    freq_row.addStretch(1)
+    layout.addLayout(freq_row)
+
     # Personal learning context section
     sep = QFrame()
     sep.setFrameShape(QFrame.Shape.HLine)
@@ -2448,6 +2533,11 @@ def show_variant_style_dialog():
             return None
         CONFIG["variant_style"] = selected
         CONFIG["learner_context"] = context_edit.toPlainText().strip()
+        CONFIG["transform_percent"] = int(freq_spin.value())
+        try:
+            mw.addonManager.writeConfig(__name__, CONFIG)
+        except Exception as e:
+            _log(f"variant-style dialog: writeConfig failed: {e}")
         return selected
 
     def on_save():
@@ -2576,10 +2666,16 @@ def _try_init():
     global _initialized
     if _initialized:
         return
+    # Set the flag *before* init_addon runs. init_addon may open a modal
+    # (e.g., the first-run API-key warning), and Qt runs a nested event loop
+    # during a modal — without this guard, a re-entrant profile_did_open or
+    # the delayed QTimer below would call init_addon a second time and fire
+    # the modal again.
+    _initialized = True
     try:
         init_addon()
-        _initialized = True
     except Exception as e:
+        _initialized = False  # allow retry on next profile open
         showInfo(f"Proteus: init failed: {e}")
 
 def _try_cleanup():
