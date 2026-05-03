@@ -1,7 +1,8 @@
 {
-    "name": "Proteus",
+    "name": "Anki Proteus",
     "package": "anki_proteus",
-    "homepage": "",
+    "homepage": "https://github.com/suyoghc/anki-proteus",
     "conflicts": [],
-    "min_point_version": 50
+    "min_point_version": 50,
+    "max_point_version": 0
 }

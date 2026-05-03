@@ -23,3 +23,6 @@ anki-proteus-knowledge/
 # Decision log — kept private. Used for personal context when working
 # on the repo, but not shipped publicly.
 Notes/DECISIONS.md
+
+# AnkiWeb package build artifact
+*.ankiaddon

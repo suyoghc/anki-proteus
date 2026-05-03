@@ -3,6 +3,12 @@
 An Anki add-on that rewrites each review question on the fly using an LLM, so
 you retrieve the concept rather than merely practice recognizing the card.
 
+> **Requires an Anthropic API key** (Claude only — no OpenAI / Gemini support
+> today). Set it under **Tools → Add-ons → Anki Proteus → Config** after
+> install. Typical cost: roughly **\$0.30–0.50 per day at 50 reviews** in
+> freeform mode (~\$6–10 per 1000 reviews). See [Cost](#cost-assuming-claude-sonnet-api-calls)
+> for the breakdown.
+
 ## Why?
 
 Spaced repetition cards have a well-known, and honestly quite frustrating,
@@ -102,6 +108,10 @@ Each style's citation marks the intellectual lineage it draws from.
 | **Transfer: Stats**          | Statistics                | Interpret model output or diagnose assumptions.                            | [11]                     |
 | **Transfer: Math**           | Math                      | Find the error or identify the technique in an equation.                   | [11]                     |
 | **Diagram Labeling**         | Visual memory             | SVG diagram with labeled blanks (A, B, C) to identify.                     | [12]                     |
+
+For example, the **Matuschak Contextualized** style on a stats card:
+
+![A Matuschak Contextualized variant on a stats card](docs/img/matuschak-contextualized.png)
 
 A good starting set is `wozniak`, `matuschak_contextualized`, `elaborative`,
 `discrimination`, and `feynman`. Add transfer or diagram styles when they fit
