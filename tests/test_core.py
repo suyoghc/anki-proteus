@@ -1491,6 +1491,30 @@ class TestMatuschakContextualizedStyle:
         assert result is not None
         assert "scenario" in captured["system"].lower()
 
+    def test_prompt_invokes_all_five_matuschak_principles(self):
+        """The regrounded prompt must name each of Matuschak's five principles.
+
+        Per Notes/DECISIONS.md D2 and the source notes in
+        anki-proteus-knowledge/Raw/matuschak-2020-how-to-write-good-prompts.md,
+        a prompt that name-checks Matuschak must also invoke his framework.
+        """
+        prompt = generator.VARIANT_STYLES["matuschak_contextualized"]["system_prompt"]
+        for principle in ("Focused", "Precise", "Consistent", "Tractable", "Effortful"):
+            assert principle in prompt, (
+                f"matuschak_contextualized prompt is missing principle '{principle}'"
+            )
+
+    def test_prompt_names_the_matuschak_category(self):
+        """The prompt must use Matuschak's own category name for the style."""
+        prompt = generator.VARIANT_STYLES["matuschak_contextualized"]["system_prompt"]
+        assert "context-laden" in prompt or "scenario prompt" in prompt
+
+    def test_prompt_cites_the_source(self):
+        """The prompt must cite Matuschak's essay so the lineage is auditable in code."""
+        prompt = generator.VARIANT_STYLES["matuschak_contextualized"]["system_prompt"]
+        assert "Matuschak" in prompt
+        assert "andymatuschak.org/prompts" in prompt
+
 
 # ===========================================================================
 # VariantCache concurrency (per-thread connections + WAL)
