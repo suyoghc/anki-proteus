@@ -2,7 +2,7 @@
     "enabled": true,
     "api_key": "",
     "model": "claude-sonnet-4-20250514",
-    "response_mode": "flip",
+    "response_mode": "freeform",
     "active_decks": [],
     "transform_percent": 80,
     "min_interval_days": 0,
