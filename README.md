@@ -1,13 +1,10 @@
 # Anki Proteus
 
-An Anki add-on that rewrites each review question on the fly using an LLM, so
-you retrieve the concept rather than merely practice recognizing the card.
+An Anki add-on that rewrites each review question on the fly during test-time using an LLM, so you retrieve the concept rather than merely practice recognizing the card.
 
 > **Requires an Anthropic API key** (Claude only — no OpenAI / Gemini support
-> today). Set it under **Tools → Add-ons → Anki Proteus → Config** after
-> install. Typical cost: roughly **\$0.30–0.50 per day at 50 reviews** in
-> freeform mode (~\$6–10 per 1000 reviews). See [Cost](#cost-assuming-claude-sonnet-api-calls)
-> for the breakdown.
+> yet). Set it under **Tools → Add-ons → Anki Proteus → Config** after
+> install. 
 
 ## Why?
 
