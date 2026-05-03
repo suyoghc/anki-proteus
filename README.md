@@ -186,27 +186,50 @@ context strings `reviewQuestion` and `reviewAnswer`.
 
 ## Installation
 
+### From AnkiWeb (recommended)
+
+1. In Anki: **Tools → Add-ons → Get Add-ons…**
+2. Paste the addon code: `<TBD — assigned on AnkiWeb upload>`.
+3. Click OK, restart Anki.
+4. Configure your API key (see below).
+
+### From a `.ankiaddon` file
+
+If you'd rather sideload a specific build (or you're testing a pre-release):
+
+1. Download `anki_proteus.ankiaddon` from the
+   [latest release](https://github.com/suyoghc/anki-proteus/releases).
+2. Either drag-and-drop the file onto Anki, or use
+   **Tools → Add-ons → Install from file…**.
+3. Restart Anki.
+4. Configure your API key (see below).
+
+### From source (for development)
+
+For working on the addon itself, symlink the repo into Anki's add-ons folder
+so code edits show up after a restart:
+
 1. Find your Anki add-ons folder:
    - **Tools → Add-ons → Open Add-ons Folder** in Anki.
    - Or: `~/.local/share/Anki2/addons21/` (Linux),
      `~/Library/Application Support/Anki2/addons21/` (macOS),
      `%APPDATA%\Anki2\addons21\` (Windows).
-
-2. Copy or symlink this repository into the add-ons folder as `anki_proteus`.
-
+2. Symlink (or copy) this repository into that folder as `anki_proteus`.
 3. Restart Anki.
+4. Configure your API key (see below).
 
-4. Configure your API key:
-   - **Tools → Add-ons** → select *Proteus* → **Config**
-   - Set `"api_key"` to your Anthropic API key.
+### Configure your API key
 
-   > **Security note on API-key storage.** Anki stores add-on config values
-   > (including `api_key`) in plaintext inside its profile folder — typically
-   > `~/Library/Application Support/Anki2/<profile>/addons21/<addon-id>/meta.json`
-   > on macOS, or the equivalent path on Windows/Linux. That file is readable
-   > by any process running as your user. Don't sync the profile folder to a
-   > shared drive, don't commit a real key into `config.json`, and rotate the
-   > key if you suspect the file was exposed.
+- **Tools → Add-ons** → select *Anki Proteus* → **Config**
+- Set `"api_key"` to your Anthropic API key.
+
+> **Security note on API-key storage.** Anki stores add-on config values
+> (including `api_key`) in plaintext inside its profile folder — typically
+> `~/Library/Application Support/Anki2/<profile>/addons21/<addon-id>/meta.json`
+> on macOS, or the equivalent path on Windows/Linux. That file is readable
+> by any process running as your user. Don't sync the profile folder to a
+> shared drive, don't commit a real key into `config.json`, and rotate the
+> key if you suspect the file was exposed.
 
 ## Configuration
 
